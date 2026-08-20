@@ -562,10 +562,10 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 			// Description of the tool (what it does)
 			description: "Control execution (break, continue, step).",
 			// Schema for the tool (input validation)
-			inputSchema: {
-				command: z.enum(["break", "isBreaked", "continue", "stepIn", "stepOut", "stepOver",
-						"stepBack", "runTo"])
-					.describe(`Available commands:
+		inputSchema: {
+			command: z.enum(["break", "isBreaked", "continue", "stepIn", "stepOut", "stepOver",
+					"stepBack", "runTo"])
+				.describe(`Available commands:
 	'break': to break CPU (pause emulation) at current execution position.
 	'isBreaked': to check if the CPU is currently in break state (1) or not (0).
 	'continue': to continue execution after break.
@@ -576,11 +576,16 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 	'runTo <address>': to run the CPU until it reaches the specified address.
 **Important Note**: Addresses and values are in hexadecimal format (e.g. 0x0000).
 `),
-				address: z.string()
-					.regex(/^0x[0-9a-fA-F]{4}$/, 'Address must be a 4 digits hexadecimal number')
-					.optional()
-					.describe("4 hexadecimal digits for a memory address (e.g. 0x4af3). Used by [runTo]"),
-			},
+			address: z.string()
+				.regex(/^0x[0-9a-fA-F]{4}$/, 'Address must be a 4 digits hexadecimal number')
+				.optional()
+				.describe("4 hexadecimal digits for a memory address (e.g. 0x4af3). Used by [runTo]"),
+			timeoutMs: z.number()
+				.int()
+				.min(1)
+				.optional()
+				.describe("Timeout in milliseconds for runTo. If the target address is not reached within this time, the command returns a timeout error. Default: no limit (waits forever)."),
+		},
 			annotations: {
 				"readOnlyHint": true,
 				"destructiveHint": false,
@@ -589,7 +594,7 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 			},
 		},
 		// Handler for the tool (function to be executed when the tool is called)
-		async ({ command, address }: { command: string; address?: string }) => {
+		async ({ command, address, timeoutMs }: { command: string; address?: string; timeoutMs?: number }) => {
 			let tclCommand: string;
 			switch (command) {
 				case "break":
@@ -621,7 +626,16 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 						`Error: Unknown debug command "${command}".`
 					]);
 			}
-			const response = await openMSXInstance.sendCommand(tclCommand);
+			let response: string;
+			if (command === "runTo" && timeoutMs) {
+				const commandPromise = openMSXInstance.sendCommand(tclCommand);
+				const timeoutPromise = new Promise<string>((_, reject) => {
+					setTimeout(() => reject(new Error(`Timeout: target address ${address} not reached within ${timeoutMs}ms`)), timeoutMs);
+				});
+				response = await Promise.race([commandPromise, timeoutPromise]);
+			} else {
+				response = await openMSXInstance.sendCommand(tclCommand);
+			}
 			//TODO: parse disassembly command response into structured content
 			return getResponseContent([
 				response
