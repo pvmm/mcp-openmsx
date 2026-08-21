@@ -30,9 +30,9 @@ if (!loopMode && !toolName) {
   console.error('Usage: node mcp_call.js <tool_name> \'{"arg":"value"}\'');
   console.error('       node mcp_call.js --loop   (reads commands from stdin)');
   console.error('       node mcp_call.js --openmsx-share-dir <path>');
-  console.error('Loop format: <tool> <command> [json_args]');
-  console.error('  Schemas are auto-queried; omit json_args to use defaults.');
-  console.error('Example: emu_control launch');
+  console.error('Loop format: <tool> <command> [args...] or <tool> <command> {json}');
+  console.error('  Positional args are mapped to schema parameters by order.');
+  console.error('Example: emu_control launch National_CF-3300');
   process.exit(1);
 }
 
@@ -110,8 +110,18 @@ function buildArgs(toolName, command, extraJson) {
     if (key === 'command') continue;
     if (prop.default !== undefined) args[key] = prop.default;
   }
-  // Merge user-provided extra args (overrides defaults)
-  if (extraJson) Object.assign(args, extraJson);
+  if (extraJson) {
+    if (Array.isArray(extraJson)) {
+      // Positional args: map to schema properties by order (skip 'command')
+      const positional = Object.keys(props).filter(k => k !== 'command');
+      for (let i = 0; i < extraJson.length && i < positional.length; i++) {
+        args[positional[i]] = extraJson[i];
+      }
+    } else {
+      // Named args: merge directly
+      Object.assign(args, extraJson);
+    }
+  }
   return args;
 }
 
@@ -147,7 +157,7 @@ async function loopCalls() {
     if (!trimmed) { rl.prompt(); return; }
     try {
       const spaceIdx = trimmed.indexOf(' ');
-      if (spaceIdx === -1) { console.error('Format: <tool> <command> [json_args]'); rl.prompt(); return; }
+      if (spaceIdx === -1) { console.error('Format: <tool> <command> [args...]'); rl.prompt(); return; }
       const tool = trimmed.slice(0, spaceIdx);
       const rest = trimmed.slice(spaceIdx + 1);
       const spaceIdx2 = rest.indexOf(' ');
@@ -157,7 +167,12 @@ async function loopCalls() {
         extraArgs = null;
       } else {
         command = rest.slice(0, spaceIdx2);
-        extraArgs = JSON.parse(rest.slice(spaceIdx2 + 1));
+        const after = rest.slice(spaceIdx2 + 1).trim();
+        if (after.startsWith('{')) {
+          extraArgs = JSON.parse(after);
+        } else {
+          extraArgs = after.split(/\s+/);
+        }
       }
       const args = buildArgs(tool, command, extraArgs);
       const result = await callTool(tool, args);
