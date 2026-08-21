@@ -30,8 +30,9 @@ if (!loopMode && !toolName) {
   console.error('Usage: node mcp_call.js <tool_name> \'{"arg":"value"}\'');
   console.error('       node mcp_call.js --loop   (reads commands from stdin)');
   console.error('       node mcp_call.js --openmsx-share-dir <path>');
-  console.error('Loop format: <tool> <command> {json_args}');
-  console.error('Example: echo \'emu_control launch {"machine":"National_CF-3300"}\' | node mcp_call.js --loop');
+  console.error('Loop format: <tool> <command> [json_args]');
+  console.error('  Schemas are auto-queried; omit json_args to use defaults.');
+  console.error('Example: emu_control launch');
   process.exit(1);
 }
 
@@ -75,11 +76,43 @@ function send(obj) {
   child.stdin.write(msg);
 }
 
-function callTool(name, args) {
+function rpcCall(method, params) {
   return new Promise((resolve) => {
-    responsePromise = resolve;
-    send({ jsonrpc: '2.0', id: callId++, method: 'tools/call', params: { name, arguments: args } });
+    const id = callId++;
+    responsePromise = (obj) => resolve(obj);
+    send({ jsonrpc: '2.0', id, method, params });
   });
+}
+
+function callTool(name, args) {
+  return rpcCall('tools/call', { name, arguments: args });
+}
+
+const toolSchemas = new Map();
+
+async function listTools() {
+  const res = await rpcCall('tools/list', {});
+  const tools = res.result?.tools || [];
+  for (const tool of tools) {
+    toolSchemas.set(tool.name, tool.inputSchema);
+  }
+}
+
+function buildArgs(toolName, command, extraJson) {
+  const schema = toolSchemas.get(toolName);
+  if (!schema) return extraJson || {};
+  const args = {};
+  const props = schema.properties || {};
+  // Set command if the schema has a command property
+  if (props.command) args.command = command;
+  // Fill in defaults from schema
+  for (const [key, prop] of Object.entries(props)) {
+    if (key === 'command') continue;
+    if (prop.default !== undefined) args[key] = prop.default;
+  }
+  // Merge user-provided extra args (overrides defaults)
+  if (extraJson) Object.assign(args, extraJson);
+  return args;
 }
 
 async function initServer() {
@@ -114,19 +147,20 @@ async function loopCalls() {
     if (!trimmed) { rl.prompt(); return; }
     try {
       const spaceIdx = trimmed.indexOf(' ');
-      if (spaceIdx === -1) { console.error('Format: <tool> <command> {json_args}'); rl.prompt(); return; }
+      if (spaceIdx === -1) { console.error('Format: <tool> <command> [json_args]'); rl.prompt(); return; }
       const tool = trimmed.slice(0, spaceIdx);
       const rest = trimmed.slice(spaceIdx + 1);
       const spaceIdx2 = rest.indexOf(' ');
-      let command, args;
+      let command, extraArgs;
       if (spaceIdx2 === -1) {
         command = rest;
-        args = {};
+        extraArgs = null;
       } else {
         command = rest.slice(0, spaceIdx2);
-        args = JSON.parse(rest.slice(spaceIdx2 + 1));
+        extraArgs = JSON.parse(rest.slice(spaceIdx2 + 1));
       }
-      const result = await callTool(tool, { command, ...args });
+      const args = buildArgs(tool, command, extraArgs);
+      const result = await callTool(tool, args);
       console.log(JSON.stringify(result));
     } catch (e) {
       console.error(`Error: ${e.message}`);
@@ -139,6 +173,8 @@ async function loopCalls() {
 async function main() {
   await initServer();
   if (loopMode) {
+    await listTools();
+    console.error(`Loaded ${toolSchemas.size} tool schemas.`);
     loopCalls();
   } else {
     singleCall();
