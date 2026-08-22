@@ -115,6 +115,9 @@ export class OpenMSX {
                 if (extensions?.length > 0) {
                     extensions.forEach(ext => args.push('-ext', ext));
                 }
+                if (process.env.OPENMSX_LAUNCH_HEADLESS?.toLowerCase() === 'true') {
+                    args.push('-command', 'set renderer none');
+                }
 
                 diag(`platform=${process.platform} IS_WINDOWS=${IS_WINDOWS}`);
                 diag(`spawn: "${executable}" ${args.join(' ')}`);
@@ -191,7 +194,9 @@ export class OpenMSX {
                     // await each command so replies are consumed in order and don't
                     // contaminate ioBuffer for subsequent user commands
                     await this.sendCommand('set save_settings_on_exit off');
-                    await this.sendCommand('set renderer SDLGL-PP');
+                    if (process.env.OPENMSX_LAUNCH_HEADLESS?.toLowerCase() !== 'true') {
+                        await this.sendCommand('set renderer SDLGL-PP');
+                    }
                     await this.sendCommand('set power on');
                     await this.sendCommand('reverse start');
                     let result = 'Ok: openMSX emulator launched successfully';
