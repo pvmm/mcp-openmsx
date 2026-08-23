@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OpenMSX } from '../../src/openmsx.js';
 import { EventEmitter } from 'events';
+import { spawn } from 'child_process';
+
+vi.mock('child_process', () => ({
+  spawn: vi.fn(),
+}));
+
+const mockSpawn = vi.mocked(spawn);
 
 /**
  * Tests for OpenMSX lifecycle methods: emu_close, forceClose, resetIO, destroy.
@@ -306,5 +313,109 @@ describe('emu_status', () => {
 
     const result = await instance.emu_status();
     expect(result).toBe('Error: not connected');
+  });
+});
+
+// ─── emu_launch — renderer ──────────────────────────────────────────────────
+
+function createLaunchMockProcess() {
+  const proc = Object.assign(new EventEmitter(), {
+    pid: 12345,
+    killed: false,
+    stdin: { write: vi.fn() },
+    stdout: new EventEmitter(),
+    stderr: new EventEmitter(),
+    kill: vi.fn(function (this: any) { this.killed = true; }),
+  });
+  return proc;
+}
+
+interface RendererInfo {
+  cliRenderer: string | null;    // from -command arg in spawn args
+  cmdRenderer: string | null;    // from sendCommand('set renderer ...')
+}
+
+async function launchAndCaptureRenderer(headless: string | undefined): Promise<RendererInfo> {
+  const saved = process.env.OPENMSX_LAUNCH_HEADLESS;
+  if (headless === undefined) {
+    delete process.env.OPENMSX_LAUNCH_HEADLESS;
+  } else {
+    process.env.OPENMSX_LAUNCH_HEADLESS = headless;
+  }
+
+  vi.useFakeTimers();
+
+  const mockProc = createLaunchMockProcess();
+  mockSpawn.mockReturnValue(mockProc as any);
+
+  const instance = new OpenMSX();
+  const sendCmdSpy = vi.spyOn(instance, 'sendCommand').mockResolvedValue('');
+
+  const launchPromise = instance.emu_launch(process.env.OPENMSX_EXECUTABLE || 'openmsx', '', []);
+
+  // Simulate openMSX stdout output triggering Linux connection
+  mockProc.stdout.emit('data', Buffer.from('<openmsx-output>\n'));
+  await vi.advanceTimersByTimeAsync(500);
+
+  // Send replies for each sendCommand call
+  for (let i = 0; i < sendCmdSpy.mock.calls.length; i++) {
+    mockProc.stdout.emit('data', Buffer.from('<reply></reply>\n'));
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  await launchPromise;
+
+  vi.useRealTimers();
+
+  // Restore env
+  if (saved === undefined) {
+    delete process.env.OPENMSX_LAUNCH_HEADLESS;
+  } else {
+    process.env.OPENMSX_LAUNCH_HEADLESS = saved;
+  }
+
+  // Check spawn args for -command set renderer <value>
+  const spawnArgs = mockSpawn.mock.calls[0]?.[1] as string[] | undefined;
+  const cmdIdx = spawnArgs?.indexOf('-command') ?? -1;
+  const cliRenderer = (cmdIdx !== -1 && spawnArgs?.[cmdIdx + 1]?.startsWith('set renderer '))
+    ? spawnArgs[cmdIdx + 1].replace('set renderer ', '')
+    : null;
+
+  // Check sendCommand calls for 'set renderer ...'
+  const rendererCall = sendCmdSpy.mock.calls.find(
+    ([cmd]) => typeof cmd === 'string' && cmd.startsWith('set renderer ')
+  );
+  const cmdRenderer = rendererCall ? (rendererCall[0] as string).replace('set renderer ', '') : null;
+
+  return { cliRenderer, cmdRenderer };
+}
+
+describe('emu_launch — renderer selection', () => {
+  beforeEach(() => {
+    mockSpawn.mockReset();
+  });
+
+  it('passes -command set renderer none via CLI when OPENMSX_LAUNCH_HEADLESS=true', async () => {
+    const info = await launchAndCaptureRenderer('true');
+    expect(info.cliRenderer).toBe('none');
+    expect(info.cmdRenderer).toBeNull();
+  });
+
+  it('sets renderer to SDLGL-PP via sendCommand when OPENMSX_LAUNCH_HEADLESS is not set', async () => {
+    const info = await launchAndCaptureRenderer(undefined);
+    expect(info.cliRenderer).toBeNull();
+    expect(info.cmdRenderer).toBe('SDLGL-PP');
+  });
+
+  it('sets renderer to SDLGL-PP via sendCommand when OPENMSX_LAUNCH_HEADLESS=false', async () => {
+    const info = await launchAndCaptureRenderer('false');
+    expect(info.cliRenderer).toBeNull();
+    expect(info.cmdRenderer).toBe('SDLGL-PP');
+  });
+
+  it('is case-insensitive for OPENMSX_LAUNCH_HEADLESS', async () => {
+    const info = await launchAndCaptureRenderer('TRUE');
+    expect(info.cliRenderer).toBe('none');
+    expect(info.cmdRenderer).toBeNull();
   });
 });
