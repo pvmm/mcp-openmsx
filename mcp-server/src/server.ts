@@ -95,10 +95,12 @@ process.on('disconnect', () => gracefulShutdown(0));
 
 // Handle uncaught exceptions and unhandled rejections
 process.on('uncaughtException', async (error) => {
+	console.error(`Uncaught exception: ${error instanceof Error ? (error.stack ?? error.message) : error}`);
 	await gracefulShutdown(1);
 });
 
 process.on('unhandledRejection', async (reason, promise) => {
+	console.error(`Unhandled rejection: ${reason instanceof Error ? (reason.stack ?? String(reason)) : String(reason)}`);
 	await gracefulShutdown(1);
 });
 

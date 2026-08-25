@@ -53,6 +53,7 @@ export function detectOpenMSXShareDir(): string {
 		const possiblePaths = [
 			// Linux paths
 			path.join(os.homedir(), '.openMSX', 'share'),
+			'/opt/openMSX/share', // default for source/make installs (INSTALL_PREFIX=/opt/openMSX)
 			'/usr/local/share/openmsx',
 			'/usr/share/openmsx',
 			// Windows paths (appdata, documents, program files, portable)
