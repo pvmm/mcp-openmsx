@@ -64,6 +64,17 @@
 **Note**: The raw Tcl one-liner to delete all breakpoints:
 `foreach {bpname body} [debug breakpoint list] { debug breakpoint remove $bpname }`
 
+## `debug_conditions` — Condition management
+
+| Command | Description |
+|---------|-------------|
+| `create` | Create a debugger condition from a Tcl expression. Param: `condition` (required). Optional: `cmd` (Tcl command), `once` (remove after first trigger), `enabled` (set `false` to create disabled). Returns condition name (e.g. `cond#1`) |
+| `remove` | Remove condition by name. Param: `condname` (e.g. `cond#1`) |
+| `list` | List all active conditions |
+| `deleteAll` | Remove all active conditions at once |
+
+**Note**: Like breakpoints, but not tied to an address: the expression is evaluated continuously while the CPU runs and fires whenever true (e.g. `[reg SP] > 0xC000`). Default trigger command is `debug break`. Disabled conditions can be re-enabled later via raw Tcl (`debug condition configure`).
+
 ## `debug_watchpoints` — Watchpoint management
 
 | Command | Description |
