@@ -85,9 +85,9 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 			// Schema for the tool (input validation)
 			inputSchema: {
 				command: z.enum(["launch", "close", "powerOn", "powerOff", "reset", "getEmulatorSpeed", "setEmulatorSpeed",
-						"machineList", "extensionList", "wait", "userDataDir", "systemDataDir"])
+						"machineList", "extensionList", "wait", "userDataDir", "systemDataDir", "attach", "detach"])
 					.describe(`Available commands:
-'launch [machine] [extensions]': opens a powered-on openMSX emulator; you must wait some time waiting the machine is fully booted; machine and extensions parameters can be specified so use 'machineList' and 'extensionList' commands to obtain valid values, or let them ambiguous and use elicitation. " +
+'launch [machine] [extensions]': opens a powered-on openMSX emulator; you must wait some time waiting the machine is fully booted; machine and extensions parameters can be specified so use 'machineList' and 'extensionList' commands to obtain valid values, or let them ambiguous and use elicitation.
 'close': closes the openMSX emulator.
 'powerOn': powers on the openMSX emulator.
 'powerOff': powers off the openMSX emulator.
@@ -99,6 +99,8 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 'wait <seconds>': performs a wait for the specified number of seconds, default is 3.
 'userDataDir': returns the openMSX user data directory path.
 'systemDataDir': returns the openMSX system data directory path.
+'attach [socketPath]': connects to a running openMSX instance. Without socketPath, scans for running instances and returns a list. With socketPath, connects to that specific instance.
+'detach': disconnects from an attached openMSX instance without closing it.
 `),
 				machine: z.string()
 					.max(100, 'Machine name too long')
@@ -121,6 +123,10 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 					.optional()
 					.default(3)
 					.describe("Number of seconds to wait; default is 3. Used by [wait]."),
+				socketPath: z.string()
+					.min(1, 'Socket path cannot be empty')
+					.optional()
+					.describe("Path to the Unix domain socket (Linux/macOS) or socket file (Windows) of a running openMSX instance. Used by [attach]."),
 			},
 			outputSchema: {
 				command: z.string().describe("The command that was executed."),
@@ -136,6 +142,12 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 					description: z.string().describe("Extension description."),
 				})).optional()
 					.describe("List of available MSX extensions. Present for 'extensionList'."),
+				instances: z.array(z.object({
+					pid: z.number().describe("Process ID of the openMSX instance."),
+					socketPath: z.string().describe("Path to the control socket file."),
+					machineName: z.string().describe("Name of the emulated machine."),
+				})).optional()
+					.describe("List of running openMSX instances. Present for 'attach' when multiple instances are found."),
 				result: z.string().optional()
 					.describe("Generic result or status message."),
 			},
@@ -147,8 +159,9 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 			},
 		},
 		// Handler for the tool (function to be executed when the tool is called)
-		async ({ command, machine, extensions, emuspeed, seconds }: { command: string, machine?: string; extensions?: string[]; emuspeed?: number, seconds?: number }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+		async ({ command, machine, extensions, emuspeed, seconds, socketPath }: { command: string, machine?: string; extensions?: string[]; emuspeed?: number, seconds?: number, socketPath?: string }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
 			let result = '';
+			let attachInstances: { pid: number; socketPath: string; machineName: string }[] | undefined;
 			switch (command) {
 				case "launch": {
 					const resolved = await resolveLaunchParams(server, emuDirectories, machine, extensions);
@@ -222,6 +235,29 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 				case "systemDataDir":
 					result = await openMSXInstance.sendCommand('set $env(OPENMSX_SYSTEM_DATA)');
 					break;
+				case "attach": {
+					if (socketPath) {
+						// Connect to the specified socket directly
+						result = await openMSXInstance.emu_connect(socketPath);
+					} else {
+						// Scan for running instances
+						const instances = await openMSXInstance.scanRunningInstances();
+						if (instances.length === 0) {
+							result = "No running openMSX instances found. Launch one first with [launch].";
+						} else if (instances.length === 1) {
+							// Auto-connect to the only instance
+							result = await openMSXInstance.emu_connect(instances[0].socketPath);
+						} else {
+							// Return list for agent to present via elicitation
+							result = `Found ${instances.length} running openMSX instances. Use elicitation to ask the user which one to connect to, then call [attach] with the chosen socketPath.`;
+							attachInstances = instances;
+						}
+					}
+					break;
+				}
+				case "detach":
+					result = await openMSXInstance.emu_close();
+					break;
 				default:
 					result = `Error: Unknown command "${command}".`;
 					break;
@@ -254,6 +290,14 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 						const extensions = JSON.parse(result);
 						structuredContent = { command, extensions };
 					} catch {
+						structuredContent = { command, result };
+					}
+					break;
+				}
+				case 'attach': {
+					if (attachInstances) {
+						structuredContent = { command, instances: attachInstances, result };
+					} else {
 						structuredContent = { command, result };
 					}
 					break;

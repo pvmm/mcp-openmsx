@@ -8,6 +8,8 @@ import fs from "fs/promises";
 import { extractDescriptionFromXML, decodeHtmlEntities, encodeHtmlEntities } from "./utils.js";
 import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
+import net from 'net';
+import os from 'os';
 import { OpenMsxWindowsConnector, WindowsControlConnection, WindowsControlMode } from "./openmsx_windows.js";
 
 /** True when running on Windows. Evaluated once at module load. */
@@ -39,10 +41,21 @@ interface LaunchCallbacks {
     onReady: (sendControlTag: boolean) => Promise<void>;
 }
 
+/** Description of a running openMSX instance discovered by scanRunningInstances. */
+type RunningInstance = {
+    pid: number;
+    socketPath: string;
+    machineName: string;
+};
+
 export class OpenMSX {
     private lastMachine: string | null = null;
     private process: ChildProcess | null = null;
     private isConnected: boolean = false;
+    // True when connected to an external openMSX instance (not launched by us).
+    private isAttached: boolean = false;
+    // Path of the Unix domain socket we're attached to (null when launched or idle).
+    private attachedSocketPath: string | null = null;
 
     // Active writable control channel: process.stdin (Linux/macOS) or the
     // Windows connection's input (TCP socket / SSPI proxy stdin).
@@ -79,7 +92,7 @@ export class OpenMSX {
             };
 
             try {
-                if (this.process && !this.process.killed) {
+                if (this.isConnected || (this.process && !this.process.killed)) {
                     safeResolve(`Error: openMSX emulator instance is already running (current machine: ${this.lastMachine}). Close it first.`);
                     return;
                 }
@@ -378,6 +391,15 @@ export class OpenMSX {
     }
 
     async emu_close(): Promise<string> {
+        // Attached (external) instance: just disconnect — don't kill the process
+        if (this.isAttached) {
+            const socketPath = this.attachedSocketPath || 'unknown';
+            this.resetIO();
+            this.isAttached = false;
+            this.attachedSocketPath = null;
+            this.lastMachine = null;
+            return `Ok: Disconnected from openMSX instance at ${socketPath}`;
+        }
         return new Promise((resolve) => {
             let resolved = false;
             const safeResolve = (message: string) => {
@@ -457,6 +479,373 @@ export class OpenMSX {
     }
 
     /**
+     * Scan for running openMSX instances on this system.
+     *
+     * On Linux/macOS, openMSX creates Unix domain sockets at
+     * `/tmp/openmsx-<username>/socket.<PID>`. This method scans that directory,
+     * validates each socket file, and queries each instance for its machine name.
+     * Stale sockets (no running process) are cleaned up automatically.
+     */
+    async scanRunningInstances(): Promise<RunningInstance[]> {
+        if (IS_WINDOWS) {
+            // Windows: scan %TEMP%\openmsx-default\socket.* for TCP port files
+            return this.scanRunningInstancesWindows();
+        }
+        return this.scanRunningInstancesUnix();
+    }
+
+    private async scanRunningInstancesUnix(): Promise<RunningInstance[]> {
+        const instances: RunningInstance[] = [];
+        const username = os.userInfo().username;
+        const socketDir = `/tmp/openmsx-${username}`;
+
+        try {
+            const entries = await fs.readdir(socketDir);
+            for (const entry of entries) {
+                if (!entry.startsWith('socket.')) continue;
+                const pid = parseInt(entry.substring('socket.'.length), 10);
+                if (isNaN(pid) || pid <= 0) continue;
+
+                const socketPath = path.join(socketDir, entry);
+                try {
+                    // Verify the process is alive
+                    try {
+                        process.kill(pid, 0); // signal 0 = existence check
+                    } catch {
+                        // Process not running — clean up stale socket
+                        try { await fs.unlink(socketPath); } catch { /* ignore */ }
+                        continue;
+                    }
+
+                    // Try to connect and query the machine name
+                    const machineName = await this.querySocketIdentity(socketPath, 3000);
+                    if (machineName !== null) {
+                        instances.push({ pid, socketPath, machineName });
+                    }
+                } catch {
+                    // Skip unresponsive or invalid sockets
+                }
+            }
+        } catch {
+            // Socket directory doesn't exist or can't be read — no instances
+        }
+        return instances;
+    }
+
+    private async scanRunningInstancesWindows(): Promise<RunningInstance[]> {
+        const instances: RunningInstance[] = [];
+        const tempDir = process.env.TEMP || process.env.USERPROFILE || os.tmpdir();
+        const socketDir = path.join(tempDir, 'openmsx-default');
+
+        try {
+            const entries = await fs.readdir(socketDir);
+            for (const entry of entries) {
+                if (!entry.startsWith('socket.')) continue;
+                const pid = parseInt(entry.substring('socket.'.length), 10);
+                if (isNaN(pid) || pid <= 0) continue;
+
+                const socketFile = path.join(socketDir, entry);
+                try {
+                    // Verify the process is alive
+                    try {
+                        process.kill(pid, 0);
+                    } catch {
+                        // Process not running — clean up stale socket file
+                        try { await fs.unlink(socketFile); } catch { /* ignore */ }
+                        continue;
+                    }
+
+                    // On Windows the socket file contains a TCP port number
+                    const portStr = (await fs.readFile(socketFile, 'utf8')).trim();
+                    const port = parseInt(portStr, 10);
+                    if (isNaN(port) || port <= 0) continue;
+
+                    const machineName = await this.queryTcpIdentity(port, 3000);
+                    if (machineName !== null) {
+                        instances.push({ pid, socketPath: socketFile, machineName });
+                    }
+                } catch {
+                    // Skip unresponsive or invalid sockets
+                }
+            }
+        } catch {
+            // Socket directory doesn't exist — no instances
+        }
+        return instances;
+    }
+
+    /**
+     * Connect to a running openMSX instance's control socket and query its
+     * machine name. Returns the name on success, null on failure.
+     * The connection is fully torn down after the query.
+     */
+    private querySocketIdentity(socketPath: string, timeoutMs: number): Promise<string | null> {
+        return new Promise((resolve) => {
+            let resolved = false;
+            const done = (result: string | null) => {
+                if (resolved) return;
+                resolved = true;
+                socket.destroy();
+                resolve(result);
+            };
+
+            const socket = net.createConnection({ path: socketPath });
+            const timer = setTimeout(() => done(null), timeoutMs);
+
+            socket.on('error', () => done(null));
+            socket.on('connect', () => {
+                // Send <openmsx-control> to start the XML session
+                socket.write('<openmsx-control>\n');
+            });
+
+            let buffer = '';
+            socket.on('data', (data: Buffer) => {
+                buffer += data.toString();
+                if (buffer.includes('<openmsx-output>')) {
+                    // Session established — query machine name
+                    buffer = '';
+                    socket.write(`<command>${encodeHtmlEntities('machine_info config_name')}</command>\n`);
+                }
+                const replyMatch = buffer.match(/<reply result="(ok|nok)"[^>]*>(.*?)<\/reply>/s);
+                if (replyMatch) {
+                    const name = decodeHtmlEntities(replyMatch[2].trim());
+                    done(replyMatch[1] === 'ok' && name ? name : null);
+                }
+            });
+
+            socket.on('close', () => done(null));
+            socket.on('timeout', () => { socket.destroy(); done(null); });
+            socket.setTimeout(timeoutMs);
+        });
+    }
+
+    /**
+     * Connect to a running openMSX instance's TCP port and query its
+     * machine name. Used on Windows where socket files contain TCP ports.
+     */
+    private queryTcpIdentity(port: number, timeoutMs: number): Promise<string | null> {
+        return new Promise((resolve) => {
+            let resolved = false;
+            const done = (result: string | null) => {
+                if (resolved) return;
+                resolved = true;
+                socket.destroy();
+                resolve(result);
+            };
+
+            const socket = net.createConnection({ port, host: '127.0.0.1' });
+            const timer = setTimeout(() => done(null), timeoutMs);
+
+            socket.on('error', () => done(null));
+            socket.on('connect', () => {
+                // On Windows the server expects <openmsx-control> first (like TCP mode)
+                socket.write('<openmsx-control>\n');
+            });
+
+            let buffer = '';
+            socket.on('data', (data: Buffer) => {
+                buffer += data.toString();
+                if (buffer.includes('<openmsx-output>')) {
+                    buffer = '';
+                    socket.write(`<command>${encodeHtmlEntities('machine_info config_name')}</command>\n`);
+                }
+                const replyMatch = buffer.match(/<reply result="(ok|nok)"[^>]*>(.*?)<\/reply>/s);
+                if (replyMatch) {
+                    const name = decodeHtmlEntities(replyMatch[2].trim());
+                    done(replyMatch[1] === 'ok' && name ? name : null);
+                }
+            });
+
+            socket.on('close', () => done(null));
+            socket.on('timeout', () => { socket.destroy(); done(null); });
+            socket.setTimeout(timeoutMs);
+        });
+    }
+
+    /**
+     * Connect to an already-running openMSX instance via its control socket.
+     *
+     * On Linux/macOS, socketPath is a Unix domain socket file.
+     * On Windows, socketPath is a text file containing a TCP port number.
+     *
+     * The XML session is client-initiated: we send `<openmsx-control>`, openMSX
+     * replies with `<openmsx-output>`, then normal command/reply exchange follows.
+     * Unlike emu_launch, no initial configuration commands are sent — the
+     * instance is already running with its own settings.
+     */
+    async emu_connect(socketPath: string): Promise<string> {
+        if (this.isConnected) {
+            return `Error: Already connected to an openMSX instance (current machine: ${this.lastMachine}). Close it first.`;
+        }
+        this.resetIO();
+        this.commandQueue = Promise.resolve('');
+
+        return new Promise((resolve) => {
+            let resolved = false;
+            const safeResolve = (message: string) => {
+                if (!resolved) {
+                    resolved = true;
+                    resolve(message);
+                }
+            };
+
+            const cleanup = () => {
+                this.isAttached = false;
+                this.attachedSocketPath = null;
+                this.isConnected = false;
+                this.resetIO();
+            };
+
+            if (IS_WINDOWS) {
+                // Windows: socketPath is a text file containing a TCP port
+                this.connectTcp(socketPath, safeResolve, cleanup);
+            } else {
+                // Linux/macOS: socketPath is a Unix domain socket file
+                this.connectUnix(socketPath, safeResolve, cleanup);
+            }
+
+            setTimeout(() => {
+                if (!this.isConnected) {
+                    cleanup();
+                    safeResolve(`Error: Timeout connecting to openMSX instance at ${socketPath}`);
+                }
+            }, 10000);
+        });
+    }
+
+    private connectUnix(
+        socketPath: string,
+        safeResolve: (msg: string) => void,
+        cleanup: () => void,
+    ): void {
+        const socket = net.createConnection({ path: socketPath });
+        this.controlWritable = socket;
+
+        socket.on('error', (err: Error) => {
+            if (!this.isConnected) {
+                cleanup();
+                safeResolve(`Error: Failed to connect to openMSX at ${socketPath}: ${err.message}`);
+            }
+        });
+
+        socket.on('close', () => {
+            if (this.isConnected && this.isAttached) {
+                this.isConnected = false;
+                this.isAttached = false;
+                this.attachedSocketPath = null;
+                this.resetIO();
+            }
+        });
+
+        socket.on('connect', () => {
+            // Client-initiated session: send <openmsx-control>, wait for <openmsx-output>
+            socket.write('<openmsx-control>\n');
+        });
+
+        let buffer = '';
+        socket.on('data', (data: Buffer) => {
+            buffer += data.toString();
+            if (!this.isConnected && buffer.includes('<openmsx-output>')) {
+                this.isConnected = true;
+                this.isAttached = true;
+                this.attachedSocketPath = socketPath;
+                this.ioBuffer = buffer.substring(
+                    buffer.indexOf('<openmsx-output>') + '<openmsx-output>'.length
+                );
+                buffer = '';
+                // Query machine name and resolve
+                this.sendCommand('machine_info config_name').then((name) => {
+                    this.lastMachine = name.startsWith('Error:') ? null : name;
+                    const machineInfo = this.lastMachine ? ` (machine: ${this.lastMachine})` : '';
+                    safeResolve(`Ok: Connected to openMSX instance${machineInfo} at ${socketPath}`);
+                }).catch(() => {
+                    this.lastMachine = null;
+                    safeResolve(`Ok: Connected to openMSX instance at ${socketPath}`);
+                });
+            } else if (this.isConnected) {
+                // Ongoing data — accumulate for readData()
+                this.ioBuffer += data.toString();
+                if (this.ioNotify) {
+                    const notify = this.ioNotify;
+                    this.ioNotify = null;
+                    notify();
+                }
+            }
+        });
+    }
+
+    private connectTcp(
+        socketPath: string,
+        safeResolve: (msg: string) => void,
+        cleanup: () => void,
+    ): void {
+        // Read the TCP port from the Windows socket file
+        fs.readFile(socketPath, 'utf8').then((portStr) => {
+            const port = parseInt(portStr.trim(), 10);
+            if (isNaN(port) || port <= 0) {
+                cleanup();
+                safeResolve(`Error: Invalid TCP port in socket file ${socketPath}`);
+                return;
+            }
+
+            const socket = net.createConnection({ port, host: '127.0.0.1' });
+            this.controlWritable = socket;
+
+            socket.on('error', (err: Error) => {
+                if (!this.isConnected) {
+                    cleanup();
+                    safeResolve(`Error: Failed to connect to openMSX on port ${port}: ${err.message}`);
+                }
+            });
+
+            socket.on('close', () => {
+                if (this.isConnected && this.isAttached) {
+                    this.isConnected = false;
+                    this.isAttached = false;
+                    this.attachedSocketPath = null;
+                    this.resetIO();
+                }
+            });
+
+            socket.on('connect', () => {
+                socket.write('<openmsx-control>\n');
+            });
+
+            let buffer = '';
+            socket.on('data', (data: Buffer) => {
+                buffer += data.toString();
+                if (!this.isConnected && buffer.includes('<openmsx-output>')) {
+                    this.isConnected = true;
+                    this.isAttached = true;
+                    this.attachedSocketPath = socketPath;
+                    this.ioBuffer = buffer.substring(
+                        buffer.indexOf('<openmsx-output>') + '<openmsx-output>'.length
+                    );
+                    buffer = '';
+                    this.sendCommand('machine_info config_name').then((name) => {
+                        this.lastMachine = name.startsWith('Error:') ? null : name;
+                        const machineInfo = this.lastMachine ? ` (machine: ${this.lastMachine})` : '';
+                        safeResolve(`Ok: Connected to openMSX instance${machineInfo} via port ${port}`);
+                    }).catch(() => {
+                        this.lastMachine = null;
+                        safeResolve(`Ok: Connected to openMSX instance via port ${port}`);
+                    });
+                } else if (this.isConnected) {
+                    this.ioBuffer += data.toString();
+                    if (this.ioNotify) {
+                        const notify = this.ioNotify;
+                        this.ioNotify = null;
+                        notify();
+                    }
+                }
+            });
+        }).catch((err: Error) => {
+            cleanup();
+            safeResolve(`Error: Failed to read socket file ${socketPath}: ${err.message}`);
+        });
+    }
+
+    /**
      * Send a TCL command to openMSX and return the response.
      *
      * Internally serialized via a promise queue so concurrent callers (with or
@@ -487,7 +876,8 @@ export class OpenMSX {
     }
 
     private writeData(data: string): void {
-        if (!this.process || !this.isConnected) throw new Error('openMSX process not running or not connected');
+        if (!this.isConnected) throw new Error('openMSX process not running or not connected');
+        if (!this.process && !this.isAttached) throw new Error('openMSX process not running or not connected');
         const channel = this.controlWritable as (NodeJS.WritableStream & { destroyed?: boolean }) | null;
         if (!channel || channel.destroyed) throw new Error('openMSX control channel not available');
         channel.write(data);
@@ -521,12 +911,17 @@ export class OpenMSX {
     }
 
     async destroy(): Promise<void> {
-        if (this.process && !this.process.killed) await this.emu_close();
+        if (this.isAttached || (this.process && !this.process.killed)) await this.emu_close();
     }
 
     forceClose(): void {
-        // Kill the openMSX emulator; resetIO() force-closes the control connection
-        // (TCP socket / SSPI proxy) on Windows.
+        // Attached (external) instance: just close the transport — don't kill the process
+        if (this.isAttached) {
+            this.isAttached = false;
+            this.attachedSocketPath = null;
+        }
+        // Kill the openMSX emulator if we own the process;
+        // resetIO() force-closes the control connection (TCP socket / SSPI proxy) on Windows.
         if (this.process && !this.process.killed) {
             try { this.process.kill('SIGKILL'); } catch (_) { /* ignore */ }
         }
