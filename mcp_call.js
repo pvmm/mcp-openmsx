@@ -9,6 +9,7 @@
  *   <tool> <command> key value [key value ...]    (quote values containing spaces)
  *   <tool> <command> positional args              (mapped to schema parameters by order)
  * Commands: help [tool], debug on|off, exit
+ * Interactive TTYs get TAB completion of tool names and commands.
  */
 import { spawn } from 'child_process';
 import * as readline from 'readline';
@@ -255,6 +256,34 @@ async function initServer() {
   await new Promise(r => setTimeout(r, 500));
 }
 
+// Tab completion for loop mode (interactive TTYs only): first token completes
+// tool names and special commands; second token completes the tool's command
+// enum, help's tool argument, or debug on|off.
+// NOTE: readline REPLACES the returned match substring with each hit, so the
+// second element must be the last word, not the whole line.
+function tabCompleter(line) {
+  const trailingSpace = /\s$/.test(line);
+  const parts = line.split(/\s+/);
+  let matchOn;
+  let candidates = [];
+  if (!trailingSpace && parts.length <= 1) {
+    matchOn = parts[0] || '';
+    candidates = [...new Set(['debug', 'exit', 'help', 'quit', ...toolSchemas.keys()])].sort();
+  } else if (!trailingSpace && parts.length === 2) {
+    matchOn = parts[1];
+    const head = parts[0];
+    if (head === 'help') candidates = [...toolSchemas.keys()].sort();
+    else if (head === 'debug') candidates = ['off', 'on'];
+    else {
+      const prop = toolSchemas.get(head)?.properties?.command;
+      if (prop?.enum) candidates = [...prop.enum].sort();
+    }
+  } else {
+    return [[], line];
+  }
+  return [candidates.filter(c => c.startsWith(matchOn)), matchOn];
+}
+
 async function singleCall() {
   const args = argsJson ? JSON.parse(argsJson) : {};
   const result = await callTool(toolName, args);
@@ -347,6 +376,7 @@ async function main() {
     output: process.stdout,
     terminal: process.stdin.isTTY === true,
     prompt: 'mcp> ',
+    completer: tabCompleter,
   });
   const queued = [];
   let inputClosed = false;
@@ -361,6 +391,7 @@ async function main() {
   }
   await listTools();
   console.error(`Loaded ${toolSchemas.size} tool schemas.`);
+  console.error('Use "help <tool>" to see its parameters.');
   rl.prompt();
   await loopCalls(rl, queued, () => inputClosed);
 }
