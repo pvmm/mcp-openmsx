@@ -6,6 +6,8 @@ vi.mock('../../src/openmsx.js', () => ({
     sendCommand: vi.fn(),
     emu_close: vi.fn(),
     emu_launch: vi.fn(),
+    emu_connect: vi.fn(),
+    scanRunningInstances: vi.fn(),
     getMachineList: vi.fn(),
     getExtensionList: vi.fn(),
   },
@@ -54,6 +56,8 @@ class ToolRegistry {
 const mockSendCommand = vi.mocked(openMSXInstance.sendCommand);
 const mockEmuClose = vi.mocked(openMSXInstance.emu_close);
 const mockEmuLaunch = vi.mocked(openMSXInstance.emu_launch);
+const mockEmuConnect = vi.mocked(openMSXInstance.emu_connect);
+const mockScanRunningInstances = vi.mocked(openMSXInstance.scanRunningInstances);
 const mockGetMachineList = vi.mocked(openMSXInstance.getMachineList);
 const mockGetExtensionList = vi.mocked(openMSXInstance.getExtensionList);
 const mockResolveLaunchParams = vi.mocked(resolveLaunchParams);
@@ -338,6 +342,97 @@ describe('emu_control launch', () => {
       isError: true,
     });
     expect(mockEmuLaunch).not.toHaveBeenCalled();
+  });
+});
+
+describe('emu_control attach', () => {
+  it('connects to a specific socketPath', async () => {
+    mockEmuConnect.mockResolvedValue('Ok: Connected to openMSX instance (machine: C-BIOS_MSX2) at /tmp/openmsx-user/socket.1234');
+    const handler = await findHandler('emu_control');
+    const response = await handler({ command: 'attach', socketPath: '/tmp/openmsx-user/socket.1234' });
+
+    expect(mockEmuConnect).toHaveBeenCalledWith('/tmp/openmsx-user/socket.1234');
+    expect(response.isError).toBe(false);
+    expect(response.content[0].text).toContain('Connected');
+    expect(response.structuredContent).toEqual({
+      command: 'attach',
+      result: 'Ok: Connected to openMSX instance (machine: C-BIOS_MSX2) at /tmp/openmsx-user/socket.1234',
+    });
+  });
+
+  it('returns error when emu_connect fails', async () => {
+    mockEmuConnect.mockResolvedValue('Error: Timeout connecting to openMSX instance');
+    const handler = await findHandler('emu_control');
+    const response = await handler({ command: 'attach', socketPath: '/tmp/bad-socket' });
+
+    expect(response.isError).toBe(true);
+    expect(response.content[0].text).toContain('Error');
+  });
+
+  it('scans and auto-connects when no socketPath and one instance found', async () => {
+    const instances = [{ pid: 1234, socketPath: '/tmp/openmsx-user/socket.1234', machineName: 'C-BIOS_MSX2' }];
+    mockScanRunningInstances.mockResolvedValue(instances);
+    mockEmuConnect.mockResolvedValue('Ok: Connected to openMSX instance (machine: C-BIOS_MSX2) at /tmp/openmsx-user/socket.1234');
+    const handler = await findHandler('emu_control');
+    const response = await handler({ command: 'attach' });
+
+    expect(mockScanRunningInstances).toHaveBeenCalledOnce();
+    expect(mockEmuConnect).toHaveBeenCalledWith('/tmp/openmsx-user/socket.1234');
+    expect(response.isError).toBe(false);
+    expect(response.content[0].text).toContain('Connected');
+  });
+
+  it('returns error when scan finds no instances', async () => {
+    mockScanRunningInstances.mockResolvedValue([]);
+    const handler = await findHandler('emu_control');
+    const response = await handler({ command: 'attach' });
+
+    expect(response.isError).toBe(false);
+    expect(response.content[0].text).toContain('No running openMSX instances found');
+    expect(mockEmuConnect).not.toHaveBeenCalled();
+  });
+
+  it('returns instance list when multiple instances found', async () => {
+    const instances = [
+      { pid: 1234, socketPath: '/tmp/openmsx-user/socket.1234', machineName: 'C-BIOS_MSX2' },
+      { pid: 5678, socketPath: '/tmp/openmsx-user/socket.5678', machineName: 'Panasonic_FS-A1WSX' },
+    ];
+    mockScanRunningInstances.mockResolvedValue(instances);
+    const handler = await findHandler('emu_control');
+    const response = await handler({ command: 'attach' });
+
+    expect(mockEmuConnect).not.toHaveBeenCalled();
+    expect(response.content[0].text).toContain('2 running openMSX instances');
+    expect(response.structuredContent).toEqual({
+      command: 'attach',
+      instances,
+      result: expect.stringContaining('2 running openMSX instances'),
+    });
+  });
+});
+
+describe('emu_control detach', () => {
+  it('disconnects from an attached instance', async () => {
+    mockEmuClose.mockResolvedValue('Ok: Disconnected from openMSX instance at /tmp/openmsx-user/socket.1234');
+    const handler = await findHandler('emu_control');
+    const response = await handler({ command: 'detach' });
+
+    expect(mockEmuClose).toHaveBeenCalledOnce();
+    expect(response.isError).toBe(false);
+    expect(response.content[0].text).toContain('Disconnected');
+    expect(response.structuredContent).toEqual({
+      command: 'detach',
+      result: 'Ok: Disconnected from openMSX instance at /tmp/openmsx-user/socket.1234',
+    });
+  });
+
+  it('returns error when detach fails', async () => {
+    mockEmuClose.mockResolvedValue('Error: No emulator process running');
+    const handler = await findHandler('emu_control');
+    const response = await handler({ command: 'detach' });
+
+    expect(response.isError).toBe(true);
+    expect(response.content[0].text).toContain('Error');
   });
 });
 

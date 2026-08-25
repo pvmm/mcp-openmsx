@@ -15,8 +15,10 @@
 | `wait` | Wait N seconds (1–10, default 3). Param: `seconds`. Supports abort. |
 | `userDataDir` | Returns the openMSX user data directory path. |
 | `systemDataDir` | Returns the openMSX system data directory path. |
+| `attach` | Connect to a running openMSX instance. Without `socketPath`, scans for running instances and auto-connects if only one found; if multiple, returns a list for elicitation. With `socketPath`, connects to that specific instance. |
+| `detach` | Disconnect from an attached instance without closing it. The openMSX process keeps running. |
 
-**Key params**: `machine` (string), `extensions` (string[]), `emuspeed` (number), `seconds` (number).
+**Key params**: `machine` (string), `extensions` (string[]), `emuspeed` (number), `seconds` (number), `socketPath` (string).
 
 ## `emu_media` — Manage tapes, ROM cartridges, and floppy disks
 
