@@ -174,6 +174,16 @@ debug_run { command: "continue" }
 
 Execution will pause when the breakpoint address is hit.
 
+### Condition example
+
+To pause only when a specific value appears (e.g. tracing when the interpreter reads a given token), use a condition instead:
+
+```
+debug_conditions { command: "create", condition: "[reg A] == 0xFF" }
+```
+
+Conditions are not tied to an address: the expression is evaluated continuously and pauses execution whenever it becomes true. Use `once: true` to auto-remove after the first hit.
+
 ## Time-Travel Debugging for BASIC
 
 ### Go back in time to re-inspect

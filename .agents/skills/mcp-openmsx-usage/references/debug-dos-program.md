@@ -85,6 +85,18 @@ debug_memory { command: "selectedSlots" }
 
 If PC is not where expected, the breakpoint may have fired on a system call that happens to pass through the same address. Continue and wait for the real hit.
 
+### Conditions follow the same rule
+
+Address-less conditions (`debug_conditions`) are evaluated from boot onwards too, so the same contamination warning applies. Scope them by PC range so they can only fire inside your program (MSX-DOS TPA starts at 0x0100):
+
+```
+debug_conditions { command: "create", condition: "![pc_in_slot 0] && [reg PC] >= 0x0100 && [reg PC] < 0xC000 && [reg A] == 0x42" }
+```
+
+> The leading `![pc_in_slot 0]` excludes slot 0: BIOS/DOS routines live in the BIOS ROM (slot 0) but still pass through addresses `0x0100`–`0xBFFF`, so without this check the condition can fire on ROM calls instead of your code. `pc_in_slot <primary_slot>` returns whether the CPU's program counter is executing from that slot and is designed for conditions (per `share/scripts/_slot.tcl`). The equivalent low-level check is `[lindex [get_selected_slot <page>] 0] != 0` for each RAM page — note `get_selected_slot` returns the list `{primary_slot secondary_slot}`, so it must be indexed, not compared directly.
+
+Create them only after the app is confirmed running, exactly as with breakpoints.
+
 ---
 
 ## Common Mistake: Breakpoint Before Boot Completes
