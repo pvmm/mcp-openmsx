@@ -172,6 +172,31 @@ tests/
 - OpenMSX class methods → inject state via `(instance as any).ioBuffer = ...` to bypass `emu_launch`
 - Tool handler logic → reproduce the handler pattern inline, mock `openMSXInstance.sendCommand`
 
+### Live testing with mcp_call.js
+
+`mcp_call.js` (project root) spawns the built MCP server and sends tool calls over JSON-RPC. Use it for end-to-end testing against a real openMSX instance.
+
+```bash
+# Always rebuild after switching branches — mcp_call.js runs mcp-server/dist/
+cd mcp-server && npm run build && cd ..
+
+# Pipe commands via stdin (loop mode)
+printf '%s\n' \
+  'emu_control launch machine C-BIOS_MSX2' \
+  'emu_control wait seconds 4' \
+  'debug_cpu getCpuRegisters' \
+  'emu_control close' \
+  | node mcp_call.js --loop --openmsx-share-dir /opt/openMSX/share
+```
+
+**KV argument syntax limitation**: `parseLoopArgs` detects key-value mode by checking if even-indexed tokens are schema property names. Tools whose first positional arg is a `command` *value* (e.g. `debug_conditions create condition "..."`) fail KV parsing because `create` isn't a property name — use `{json}` syntax instead:
+```
+debug_conditions {"command":"create","condition":"[reg A] == 0x42"}
+```
+Tools like `emu_control launch machine ...` work because `machine` *is* a property name.
+
+**openMSX Tcl command names**: verify with `openmsx_tcl_cmd "help <topic>"` before assuming a command exists. Common mistakes: `machine_info config_name` (not `machine_info name`), `debug condition create` (not `debug set_condition`).
+
 ---
 
 ## Manual tool testing
