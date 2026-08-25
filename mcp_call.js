@@ -4,7 +4,11 @@
  * Usage:  node mcp_call.js <tool_name> '<json_args>'
  *         node mcp_call.js --loop
  * Example: node mcp_call.js emu_control '{"command":"launch","machine":"National_CF-3300"}'
- * Loop mode: reads lines as <tool> <command> {json_args}
+ * Loop mode: reads lines as:
+ *   <tool> <command> {json_args}
+ *   <tool> <command> key value [key value ...]    (quote values containing spaces)
+ *   <tool> <command> positional args              (mapped to schema parameters by order)
+ * Commands: help [tool], debug on|off, exit
  */
 import { spawn } from 'child_process';
 import * as readline from 'readline';
@@ -14,10 +18,10 @@ import { fileURLToPath } from 'url';
 const argv = process.argv.slice(2);
 const loopMode = argv.includes('--loop');
 
-let openmsxShareDir = '/usr/share/openmsx';
+let openmsxShareDirArg = null;
 const shareDirIdx = argv.indexOf('--openmsx-share-dir');
 if (shareDirIdx !== -1) {
-  openmsxShareDir = argv[shareDirIdx + 1] || openmsxShareDir;
+  openmsxShareDirArg = argv[shareDirIdx + 1] || null;
   argv.splice(shareDirIdx, 2);
 }
 
@@ -29,10 +33,12 @@ const [toolName, argsJson] = argv;
 if (!loopMode && !toolName) {
   console.error('Usage: node mcp_call.js <tool_name> \'{"arg":"value"}\'');
   console.error('       node mcp_call.js --loop   (reads commands from stdin)');
-  console.error('       node mcp_call.js --openmsx-share-dir <path>');
-  console.error('Loop format: <tool> <command> [args...] or <tool> <command> {json}');
-  console.error('  Positional args are mapped to schema parameters by order.');
+  console.error('       node mcp_call.js --openmsx-share-dir <path>   (optional; auto-detected otherwise)');
+  console.error('Loop format: <tool> <command> [{json} | key value ... | positional args]');
+  console.error('  Quoted values are kept as a single parameter: condition "[reg A] == 0x42"');
+  console.error('Commands: help [tool], debug on|off, exit');
   console.error('Example: emu_control launch National_CF-3300');
+  console.error('Example: debug_breakpoints create address 0x4010 condition "[reg A] == 0x42"');
   process.exit(1);
 }
 
@@ -42,14 +48,17 @@ const srvArgs = [join(__dirname, 'mcp-server', 'dist', 'server.js')];
 
 const child = spawn(srvCommand, srvArgs, {
   stdio: ['pipe', 'pipe', 'pipe'],
-  env: { ...process.env, OPENMSX_SHARE_DIR: openmsxShareDir },
+  // Only override OPENMSX_SHARE_DIR when explicitly requested; otherwise let
+  // the server inherit the environment or auto-detect (incl. /opt/openMSX/share).
+  env: openmsxShareDirArg ? { ...process.env, OPENMSX_SHARE_DIR: openmsxShareDirArg } : { ...process.env },
 });
 
 let buffer = '';
-let responsePromise;
 let callId = 1;
+const pending = new Map(); // json-rpc id -> resolve
 
 child.stdout.on('data', (chunk) => {
+  if (process.env.MCP_CALL_DEBUG) console.error('[raw<<]', JSON.stringify(chunk.toString()));
   buffer += chunk.toString();
   // Try to parse complete JSON objects from buffer
   const lines = buffer.split('\n');
@@ -59,27 +68,29 @@ child.stdout.on('data', (chunk) => {
     if (!trimmed) continue;
     try {
       const obj = JSON.parse(trimmed);
-      if (responsePromise && obj.id !== undefined) {
-        responsePromise(obj);
-        responsePromise = null;
+      if (obj.id !== undefined && pending.has(obj.id)) {
+        pending.get(obj.id)(obj);
+        pending.delete(obj.id);
       }
     } catch {}
   }
 });
 
 child.stderr.on('data', (chunk) => {
-  // suppress server stderr
+  // Forward server diagnostics; silent server failures are undebuggable.
+  process.stderr.write(`[server] ${chunk}`);
 });
 
 function send(obj) {
   const msg = JSON.stringify(obj) + '\n';
+  if (process.env.MCP_CALL_DEBUG) console.error('[raw>>]', msg.length > 200 ? msg.slice(0, 200) + '…' : msg);
   child.stdin.write(msg);
 }
 
 function rpcCall(method, params) {
   return new Promise((resolve) => {
     const id = callId++;
-    responsePromise = (obj) => resolve(obj);
+    pending.set(id, resolve);
     send({ jsonrpc: '2.0', id, method, params });
   });
 }
@@ -89,12 +100,120 @@ function callTool(name, args) {
 }
 
 const toolSchemas = new Map();
+let debugMode = false;
 
 async function listTools() {
   const res = await rpcCall('tools/list', {});
   const tools = res.result?.tools || [];
   for (const tool of tools) {
     toolSchemas.set(tool.name, tool.inputSchema);
+  }
+}
+
+// Shell-like tokenizer: bare tokens split on whitespace; double- or single-quoted
+// sections (with \" and \\ escapes) become a single token.
+function tokenize(str) {
+  const re = /"((?:\\.|[^"\\])*)"|'([^']*)'|(\S+)/g;
+  const tokens = [];
+  let m;
+  while ((m = re.exec(str)) !== null) {
+    if (m[1] !== undefined) tokens.push(m[1].replace(/\\(.)/g, '$1'));
+    else if (m[2] !== undefined) tokens.push(m[2]);
+    else tokens.push(m[3]);
+  }
+  return tokens;
+}
+
+function coerceValue(key, value, prop) {
+  const type = Array.isArray(prop.type) ? prop.type[0] : prop.type;
+  switch (type) {
+    case 'boolean': {
+      const v = value.toLowerCase();
+      if (v === 'true') return true;
+      if (v === 'false') return false;
+      throw new Error(`expected boolean for '${key}' (true|false), got "${value}"`);
+    }
+    case 'number':
+    case 'integer': {
+      const n = Number(value);
+      if (!Number.isFinite(n)) throw new Error(`expected number for '${key}', got "${value}"`);
+      if (type === 'integer' && !Number.isInteger(n)) throw new Error(`expected integer for '${key}', got "${value}"`);
+      return n;
+    }
+    case 'array': {
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {}
+      return value.split(',').map(s => s.trim()).filter(s => s.length > 0);
+    }
+    default:
+      return value;
+  }
+}
+
+// Parse loop-mode arguments after the command: '{json}' object, 'key value ...'
+// pairs, or a positional list. KV mode triggers when the first token (or any
+// even-indexed token) is a schema property name; it is then validated strictly.
+// Rare ambiguity (a positional call whose values are all key names): use {json}.
+function parseLoopArgs(toolName, after) {
+  if (after.startsWith('{')) return JSON.parse(after);
+  const schema = toolSchemas.get(toolName);
+  const props = (schema && schema.properties) || {};
+  const tokens = tokenize(after);
+  const kvIntent = tokens.length > 0 &&
+    tokens.some((t, i) => i % 2 === 0 && Object.hasOwn(props, t));
+  if (!kvIntent) return tokens;
+  if (tokens.length % 2 !== 0) {
+    throw new Error(`missing value for '${tokens[tokens.length - 1]}'`);
+  }
+  const obj = {};
+  for (let i = 0; i < tokens.length; i += 2) {
+    if (!Object.hasOwn(props, tokens[i])) {
+      throw new Error(`unknown parameter '${tokens[i]}'. Valid: ${Object.keys(props).join(', ')}`);
+    }
+    obj[tokens[i]] = coerceValue(tokens[i], tokens[i + 1], props[tokens[i]]);
+  }
+  return obj;
+}
+
+function wrapText(text, width) {
+  const lines = [];
+  for (const para of text.split('\n')) {
+    const words = para.split(/\s+/).filter(Boolean);
+    let line = '';
+    for (const w of words) {
+      if (line && (line + ' ' + w).length > width) { lines.push(line); line = w; }
+      else line = line ? line + ' ' + w : w;
+    }
+    if (line) lines.push(line);
+  }
+  return lines;
+}
+
+function showHelp(toolName) {
+  if (!toolName) {
+    console.log('Available tools:');
+    for (const name of toolSchemas.keys()) console.log(`  ${name}`);
+    console.log('Use "help <tool>" to see its parameters.');
+    return;
+  }
+  const schema = toolSchemas.get(toolName);
+  if (!schema) {
+    console.error(`Error: unknown tool "${toolName}". Use "help" to list tools.`);
+    return;
+  }
+  const required = schema.required || [];
+  console.log(`${toolName}`);
+  for (const [key, prop] of Object.entries(schema.properties || {})) {
+    const type = Array.isArray(prop.type) ? prop.type.join('|') : (prop.type || 'any');
+    const bits = [`  ${key} <${type}>`, required.includes(key) ? '(required)' : '(optional)'];
+    if (prop.enum) bits.push(`[${prop.enum.join('|')}]`);
+    if (prop.default !== undefined) bits.push(`(default: ${JSON.stringify(prop.default)})`);
+    console.log(bits.join(' '));
+    if (prop.description) {
+      for (const line of wrapText(prop.description, 72)) console.log(`        ${line}`);
+    }
   }
 }
 
@@ -144,56 +263,106 @@ async function singleCall() {
   process.exit(0);
 }
 
-async function loopCalls() {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true,
-    prompt: 'mcp> ',
+async function loopCalls(rl, queued, isInputClosed) {
+  // Wake mechanism so the drain loop can wait for new lines or EOF.
+  const wake = { notify: () => {} };
+  rl.on('line', () => wake.notify());
+  rl.on('close', () => wake.notify());
+  const waitForInput = () => new Promise((resolve) => {
+    wake.notify = resolve;
+    // Re-check after registering: a line/EOF may have arrived meanwhile
+    if (queued.length > 0 || isInputClosed()) resolve();
   });
-  rl.prompt();
-  rl.on('line', async (line) => {
+
+  let chain = Promise.resolve();
+  while (true) {
+    while (queued.length === 0 && !isInputClosed()) await waitForInput();
+    if (queued.length === 0 && isInputClosed()) break;
+    const line = queued.shift();
     const trimmed = line.trim();
-    if (!trimmed) { rl.prompt(); return; }
-    try {
-      const spaceIdx = trimmed.indexOf(' ');
-      if (spaceIdx === -1) { console.error('Format: <tool> <command> [args...]'); rl.prompt(); return; }
-      const tool = trimmed.slice(0, spaceIdx);
-      const rest = trimmed.slice(spaceIdx + 1);
-      const spaceIdx2 = rest.indexOf(' ');
-      let command, extraArgs;
-      if (spaceIdx2 === -1) {
-        command = rest;
-        extraArgs = null;
+    if (trimmed === 'exit' || trimmed === 'quit') break;
+    chain = chain.then(() => handleLine(rl, line));
+    await chain.catch(() => {});
+  }
+  rl.close();
+  child.kill();
+  process.exit(0);
+}
+
+async function handleLine(rl, line) {
+  const trimmed = line.trim();
+  if (!trimmed) { rl.prompt(); return; }
+  try {
+    const spaceIdx = trimmed.indexOf(' ');
+    const head = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
+    const rest = spaceIdx === -1 ? '' : trimmed.slice(spaceIdx + 1).trim();
+
+    if (head === 'debug') {
+      if (rest && !/^(on|off)$/i.test(rest)) {
+        console.error('Usage: debug [on|off]');
       } else {
-        command = rest.slice(0, spaceIdx2);
-        const after = rest.slice(spaceIdx2 + 1).trim();
-        if (after.startsWith('{')) {
-          extraArgs = JSON.parse(after);
-        } else {
-          extraArgs = after.split(/\s+/);
-        }
+        debugMode = rest ? rest.toLowerCase() === 'on' : !debugMode;
+        console.log(`debug ${debugMode ? 'enabled' : 'disabled'}.`);
       }
-      const args = buildArgs(tool, command, extraArgs);
-      const result = await callTool(tool, args);
-      console.log(JSON.stringify(result));
-    } catch (e) {
-      console.error(`Error: ${e.message}`);
+      rl.prompt();
+      return;
     }
-    rl.prompt();
-  });
-  rl.on('close', () => { child.kill(); process.exit(0); });
+
+    if (head === 'help') {
+      showHelp(rest ? rest.split(/\s+/)[0] : null);
+      rl.prompt();
+      return;
+    }
+
+    if (spaceIdx === -1) {
+      console.error('Format: <tool> <command> [{json} | key value ... | positional args]');
+      rl.prompt();
+      return;
+    }
+    const tool = head;
+    const spaceIdx2 = rest.indexOf(' ');
+    let command, extraArgs;
+    if (spaceIdx2 === -1) {
+      command = rest;
+      extraArgs = null;
+    } else {
+      command = rest.slice(0, spaceIdx2);
+      extraArgs = parseLoopArgs(tool, rest.slice(spaceIdx2 + 1).trim());
+    }
+    const args = buildArgs(tool, command, extraArgs);
+    if (debugMode) console.error('[debug] arguments:', JSON.stringify(args, null, 2));
+    const result = await callTool(tool, args);
+    console.log(JSON.stringify(result));
+  } catch (e) {
+    console.error(`Error: ${e.message}`);
+  }
+  rl.prompt();
 }
 
 async function main() {
+  // Attach to stdin IMMEDIATELY: piped input may close before the init
+  // handshake finishes, so lines must be buffered, not read late.
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: process.stdin.isTTY === true,
+    prompt: 'mcp> ',
+  });
+  const queued = [];
+  let inputClosed = false;
+  rl.on('line', (line) => queued.push(line));
+  rl.on('close', () => { inputClosed = true; });
+
   await initServer();
-  if (loopMode) {
-    await listTools();
-    console.error(`Loaded ${toolSchemas.size} tool schemas.`);
-    loopCalls();
-  } else {
-    singleCall();
+  if (!loopMode) {
+    rl.close();
+    await singleCall();
+    return;
   }
+  await listTools();
+  console.error(`Loaded ${toolSchemas.size} tool schemas.`);
+  rl.prompt();
+  await loopCalls(rl, queued, () => inputClosed);
 }
 
 main().catch(e => { console.error(e.message); child.kill(); process.exit(1); });
