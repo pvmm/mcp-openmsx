@@ -224,7 +224,7 @@ describe('debug_watchpoints commands', () => {
 		});
 
 		expect(mockSendCommand).toHaveBeenCalledWith(
-			'debug set_watchpoint -once write_mem {0x4000 0x4FFF} {[reg A] < 128} {debug break}',
+			'debug watchpoint create -type write_mem -address {0x4000 0x4FFF} -condition {[reg A] < 128} -command {debug break} -once 1',
 		);
 		expect(response.structuredContent).toEqual({
 			command: 'create',
@@ -244,7 +244,7 @@ describe('debug_watchpoints commands', () => {
 			end: '0x9A',
 		});
 
-		expect(mockSendCommand).toHaveBeenCalledWith('debug set_watchpoint read_io {0x98 0x9A}');
+		expect(mockSendCommand).toHaveBeenCalledWith('debug watchpoint create -type read_io -address {0x98 0x9A}');
 		expect(response.structuredContent).toEqual({
 			command: 'create',
 			createdName: 'wp#3',
