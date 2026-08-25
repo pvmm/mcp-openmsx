@@ -4,6 +4,7 @@ import {
   parseVdpRegs,
   parsePalette,
   parseBreakpoints,
+  parseConditions,
   parseWatchpoints,
   parseReplayStatus,
 } from '../../src/utils.js';
@@ -201,6 +202,80 @@ describe('parseBreakpoints', () => {
     expect(parseBreakpoints('bp#1 {}')).toEqual([{
       name: 'bp#1', address: '', condition: '', command: '', enabled: false, once: false,
     }]);
+  });
+});
+
+// ─── parseConditions ─────────────────────────────────────────────────────────
+
+describe('parseConditions', () => {
+  it('parses a single condition with all fields', () => {
+    const input = 'cond#1 {-condition {[reg A] == 0x42} -command {debug break} -enabled 1 -once 0}';
+    const conds = parseConditions(input);
+    expect(conds).toHaveLength(1);
+    expect(conds[0]).toEqual({
+      name: 'cond#1',
+      condition: '[reg A] == 0x42', command: 'debug break', enabled: true, once: false,
+    });
+  });
+
+  it('parses multiple conditions on the same line', () => {
+    const input = 'cond#1 {-condition {[reg PC] < 0x8000} -command {puts hi} -enabled 1 -once 1} cond#2 {-condition {[reg SP] > 0xC000} -command {debug break} -enabled 0 -once 0}';
+    const conds = parseConditions(input);
+    expect(conds).toHaveLength(2);
+    expect(conds[0].name).toBe('cond#1');
+    expect(conds[0].condition).toBe('[reg PC] < 0x8000');
+    expect(conds[0].command).toBe('puts hi');
+    expect(conds[0].enabled).toBe(true);
+    expect(conds[0].once).toBe(true);
+    expect(conds[1].name).toBe('cond#2');
+    expect(conds[1].enabled).toBe(false);
+    expect(conds[1].once).toBe(false);
+  });
+
+  it('parses conditions separated by newlines', () => {
+    const input = 'cond#1 {-condition {false} -command {debug break} -enabled 1 -once 0}\ncond#2 {-condition {[reg B] == 3} -command {debug break} -enabled 1 -once 0}';
+    const conds = parseConditions(input);
+    expect(conds).toHaveLength(2);
+    expect(conds[0].name).toBe('cond#1');
+    expect(conds[1].name).toBe('cond#2');
+  });
+
+  it('parses empty and missing condition expressions', () => {
+    const input = 'cond#3 {-condition {} -command {} -enabled 1 -once 0} cond#4 {-command {debug break} -enabled 1 -once 0}';
+    const conds = parseConditions(input);
+    expect(conds[0].condition).toBe('');
+    expect(conds[1].condition).toBe('');
+    expect(conds[1].command).toBe('debug break');
+  });
+
+  it('parses escaped braces in condition expression', () => {
+    const input = 'cond#5 {-condition {\\{blah} -command {doh\\}} -enabled 1 -once 0}';
+    const conds = parseConditions(input);
+    expect(conds[0].condition).toBe('\\{blah');
+    expect(conds[0].command).toBe('doh\\}');
+  });
+
+  it('parses braceless values in condition and command', () => {
+    const input = 'cond#6 {-condition false -command debug_break -enabled 1 -once 0}';
+    const conds = parseConditions(input);
+    expect(conds[0].condition).toBe('false');
+    expect(conds[0].command).toBe('debug_break');
+  });
+
+  it('returns empty array for empty input', () => {
+    expect(parseConditions('')).toEqual([]);
+    expect(parseConditions('   ')).toEqual([]);
+  });
+
+  it('stops at malformed input', () => {
+    const input = 'cond#1 {-condition {true} -command {} -enabled 1 -once 0} garbage cond#2 {-condition {false} -command {} -enabled 1 -once 0}';
+    const conds = parseConditions(input);
+    expect(conds).toHaveLength(1);
+  });
+
+  it('does not match breakpoint or watchpoint names', () => {
+    const input = 'bp#1 {-address 0x4000 -condition {} -command {} -enabled 1 -once 0} wp#1 {-type write_mem -address {1 4567} -condition {} -command {} -enabled 1 -once 0}';
+    expect(parseConditions(input)).toEqual([]);
   });
 });
 

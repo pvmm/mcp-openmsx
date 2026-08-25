@@ -505,6 +505,25 @@ export function parseBreakpoints(response: string): BreakpointInfo[] {
 }
 
 /**
+ * Parse the output of the openMSX 'debug condition list' TCL command into a structured array.
+ * Output format:
+ *   cond#1 {-condition {[reg A] == 0x42} -command {debug break} -enabled 1 -once 0}
+ * @param response - Raw text response from the debug condition list command
+ * @returns Array of condition objects
+ */
+export type ConditionInfo = { name: string; condition: string; command: string; enabled: boolean; once: boolean };
+
+export function parseConditions(response: string): ConditionInfo[] {
+	return parseNamedDictList(response.trim(), /^cond#\d+/).map(({ name, props }) => ({
+		name,
+		condition: props['condition'] ?? '',
+		command: props['command'] ?? '',
+		enabled: props['enabled'] === '1',
+		once: props['once'] === '1',
+	}));
+}
+
+/**
  * Parse the output of the openMSX 'debug watchpoint list' TCL command into a structured array.
  * Output format:
  *   wp#1 {-type write_mem -address {1 4567} -condition {[reg A] < 128} -command {debug break} -enabled 1 -once 0}

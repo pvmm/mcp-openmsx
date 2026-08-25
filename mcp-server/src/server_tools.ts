@@ -11,7 +11,7 @@ import fs from "fs/promises";
 import path from "path";
 import { openMSXInstance } from "./openmsx.js";
 import { VectorDB } from "./vectordb.js";
-import { encodeTypeText, buildKeyComboCommand, isErrorResponse, getResponseContent, parseCpuRegs, is16bitRegister, parseVdpRegs, parsePalette, parseBreakpoints, parseWatchpoints, parseReplayStatus, sleepWithAbort, ensureDirectoryExists, tclPath } from "./utils.js";
+import { encodeTypeText, buildKeyComboCommand, isErrorResponse, getResponseContent, parseCpuRegs, is16bitRegister, parseVdpRegs, parsePalette, parseBreakpoints, parseConditions, parseWatchpoints, parseReplayStatus, sleepWithAbort, ensureDirectoryExists, tclPath } from "./utils.js";
 import { EmuDirectories } from "./server.js";
 import { RegResource, getRegisteredResourcesList } from "./server_resources.js";
 import { resolveLaunchParams } from "./server_elicitations.js";
@@ -1219,6 +1219,127 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 				}
 				case "deleteAll": {
 					structuredContent = { command, result: "All breakpoints removed." };
+					break;
+				}
+				default:
+					structuredContent = { command, result: response };
+			}
+			return {
+				content: [{ type: "text" as const, text: response || "Ok" }],
+				structuredContent,
+				isError: false,
+			};
+		});
+
+	// debug_conditions
+	server.registerTool(
+		// Name of the tool (used to call it)
+		"debug_conditions",
+		{
+			title: "Conditions tools",
+			// Description of the tool (what it does)
+			description: "Create, remove, and list debugger conditions. Like breakpoints, but not tied to a specific address: a Tcl expression is evaluated continuously while the CPU runs, and when it becomes true the condition triggers.",
+			// Schema for the tool (input validation)
+			inputSchema: {
+				command: z.enum(["create", "remove", "list", "deleteAll"])
+					.describe(`Available commands:
+	'create': create a condition from a Tcl expression, and returns its name. Optional params: 'cmd', 'once', 'enabled'.
+	'remove <condname>': remove a condition by name (e.g. cond#1).
+	'list': enumerate the active conditions.
+	'deleteAll': remove all active conditions at once.
+**Important Note**: Conditions are checked continuously, so expressions like '[reg A] == 0x42' fire the first time register A holds that value anywhere in the execution flow.
+`),
+				condname: z.string()
+					.min(3, 'Condition name too short')
+					.max(10, 'Condition name too long')
+					.optional()
+					.describe("Condition name (e.g. cond#1). Used by [remove]"),
+				condition: z.string()
+					.max(200, 'Condition too long')
+					.optional()
+					.describe("Tcl boolean expression evaluated while the CPU runs; the condition fires whenever it is true. Examples: '[reg A] == 0x42', '[reg SP] > 0xC000 && [reg B] != 0'. Required for [create]."),
+				cmd: z.string()
+					.max(200, 'Command too long')
+					.optional()
+					.describe("Tcl command to execute when the condition triggers. Default if omitted: 'debug break'. Examples: 'puts hit', 'debug break'. Used by [create]."),
+				once: z.boolean()
+					.optional()
+					.describe("If true, remove condition after first trigger. Default: false (recurring). Used by [create]."),
+				enabled: z.boolean()
+					.optional()
+					.describe("Set to false to create the condition disabled (it can be re-enabled later with 'debug condition configure'). Default: true. Used by [create]."),
+			},
+			// Structured output schema (MCP protocol 2025-11-25)
+			outputSchema: {
+				command: z.string()
+					.describe("The executed command name."),
+				createdName: z.string().optional()
+					.describe("Name assigned to the newly created condition (e.g. 'cond#1'). Present for 'create'."),
+				removedName: z.string().optional()
+					.describe("Name of the removed condition. Present for 'remove'."),
+				conditions: z.array(z.object({
+					name: z.string(), condition: z.string(), command: z.string(),
+					enabled: z.boolean(), once: z.boolean()
+				})).optional()
+					.describe("List of active conditions. Present for 'list'."),
+				result: z.string().optional()
+					.describe("Generic result or status message."),
+			},
+			annotations: {
+				"readOnlyHint": false,
+				"destructiveHint": false,
+				"idempotentHint": false,
+				"openWorldHint": false,
+			},
+		},
+		// Handler for the tool (function to be executed when the tool is called)
+		async ({ command, condname, condition, cmd, once, enabled }: { command: string; condname?: string; condition?: string; cmd?: string; once?: boolean; enabled?: boolean }) => {
+			let tclCommand: string;
+			switch (command) {
+				case "create": {
+					if (!condition) {
+						return { content: [{ type: "text" as const, text: "Error: 'condition' is required for create." }], isError: true };
+					}
+					const cmdPart = cmd ? ` -command {${cmd}}` : '';
+					const onceFlag = once ? ' -once 1' : '';
+					const enabledFlag = enabled === false ? ' -enabled 0' : '';
+					tclCommand = `debug condition create -condition {${condition}}${cmdPart}${onceFlag}${enabledFlag}`;
+					break;
+				}
+				case "remove":
+					tclCommand = `debug condition remove ${condname}`;
+					break;
+				case "list":
+					tclCommand = 'debug condition list';
+					break;
+				case "deleteAll":
+					tclCommand = 'foreach {condname body} [debug condition list] { debug condition remove $condname }';
+					break;
+				default:
+					return { content: [{ type: "text" as const, text: `Error: Unknown condition command "${command}".` }], isError: true };
+			}
+			const response = await openMSXInstance.sendCommand(tclCommand);
+			if (isErrorResponse(response)) {
+				return { content: [{ type: "text" as const, text: response }], isError: true };
+			}
+
+			let structuredContent: Record<string, unknown>;
+			switch (command) {
+				case "create": {
+					structuredContent = { command, createdName: response.trim() };
+					break;
+				}
+				case "remove": {
+					structuredContent = { command, removedName: condname, result: response || "Ok" };
+					break;
+				}
+				case "list": {
+					const conds = parseConditions(response);
+					structuredContent = { command, conditions: conds };
+					break;
+				}
+				case "deleteAll": {
+					structuredContent = { command, result: "All conditions removed." };
 					break;
 				}
 				default:
