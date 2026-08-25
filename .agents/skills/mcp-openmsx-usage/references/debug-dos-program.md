@@ -85,6 +85,16 @@ debug_memory { command: "selectedSlots" }
 
 If PC is not where expected, the breakpoint may have fired on a system call that happens to pass through the same address. Continue and wait for the real hit.
 
+### Conditions follow the same rule
+
+Address-less conditions (`debug_conditions`) are evaluated from boot onwards too, so the same contamination warning applies. Scope them by PC range so they can only fire inside your program (MSX-DOS TPA starts at 0x0100):
+
+```
+debug_conditions { command: "create", condition: "[reg PC] >= 0x0100 && [reg PC] < 0xC000 && [reg A] == 0x42" }
+```
+
+Create them only after the app is confirmed running, exactly as with breakpoints.
+
 ---
 
 ## Common Mistake: Breakpoint Before Boot Completes
