@@ -349,14 +349,20 @@ async function handleLine(rl, line) {
       return;
     }
     const tool = head;
-    const spaceIdx2 = rest.indexOf(' ');
     let command, extraArgs;
-    if (spaceIdx2 === -1) {
-      command = rest;
-      extraArgs = null;
+    if (rest.startsWith('{')) {
+      // {json} may contain spaces: treat the whole rest as JSON
+      extraArgs = JSON.parse(rest);
+      command = typeof extraArgs.command === 'string' ? extraArgs.command : '';
     } else {
-      command = rest.slice(0, spaceIdx2);
-      extraArgs = parseLoopArgs(tool, rest.slice(spaceIdx2 + 1).trim());
+      const spaceIdx2 = rest.indexOf(' ');
+      if (spaceIdx2 === -1) {
+        command = rest;
+        extraArgs = null;
+      } else {
+        command = rest.slice(0, spaceIdx2);
+        extraArgs = parseLoopArgs(tool, rest.slice(spaceIdx2 + 1).trim());
+      }
     }
     const args = buildArgs(tool, command, extraArgs);
     if (debugMode) console.error('[debug] arguments:', JSON.stringify(args, null, 2));
