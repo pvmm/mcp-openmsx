@@ -44,6 +44,7 @@ mcp-openmsx/
 │   └── package.json
 ├── vector-db/                     # Local index generator (generate_embeddings.ts, chunker via mcp-server)
 ├── .agents/skills/                # Agent skills for MCP usage guidance
+├── mcp_call.js                    # Dev CLI for manual tool testing against the MCP server (see "Manual tool testing")
 └── AGENTS.md                      # This file
 ```
 
@@ -170,6 +171,20 @@ tests/
 - Functions using `fs` or `fetch` → mock with `vi.mock('fs/promises')` or `vi.stubGlobal('fetch', ...)`
 - OpenMSX class methods → inject state via `(instance as any).ioBuffer = ...` to bypass `emu_launch`
 - Tool handler logic → reproduce the handler pattern inline, mock `openMSXInstance.sendCommand`
+
+---
+
+## Manual tool testing
+
+`mcp_call.js` (repo root) is a dev CLI that spawns `mcp-server/dist/server.js`, performs the MCP handshake, and calls tools without an MCP client. Requires `npm run build` first.
+
+```bash
+node mcp_call.js <tool> <json-args>              # single call: node mcp_call.js emu_info '{"command":"getStatus"}'
+node mcp_call.js --loop                          # interactive REPL; also accepts piped scripts
+node mcp_call.js --openmsx-share-dir /opt/openMSX/share --loop   # override share dir
+```
+
+Loop mode reads `<tool> <command> [args]` lines. Args after tool+command are parsed in three ways: a `{json}` object, key/value pairs (shell-like quoting: `debug_breakpoints create address 0x4010 condition "[reg A] == 0x42"`), or positional fallback matching schema property order. Unknown keys in KV mode are rejected with the valid keys listed. Special commands: `help [tool]` (schema summary), `debug on|off` (dump built args JSON), `exit`. Tab completion of tool names and commands works on TTYs. Set `MCP_CALL_DEBUG=1` to log raw JSON-RPC wire traffic.
 
 ---
 
