@@ -338,3 +338,64 @@ describe('debug_vram', () => {
 		expect(mockSendCommand).not.toHaveBeenCalled();
 	});
 });
+
+describe('debug_log', () => {
+	it('logs a message to the global variable', async () => {
+		mockSendCommand.mockResolvedValue('test message');
+		const response = await (await findHandler('debug_log'))({ command: 'log', message: 'test message' });
+
+		expect(mockSendCommand).toHaveBeenCalledWith("lappend ::mcp_log {test message}");
+		expect(response).toEqual({
+			content: [{ type: 'text', text: 'test message' }],
+			isError: false,
+		});
+	});
+
+	it('escapes braces in log messages', async () => {
+		mockSendCommand.mockResolvedValue('');
+		await (await findHandler('debug_log'))({ command: 'log', message: 'value is {hello}' });
+
+		expect(mockSendCommand).toHaveBeenCalledWith("lappend ::mcp_log {value is \\{hello\\}}");
+	});
+
+	it('reads accumulated messages and clears the buffer', async () => {
+		mockSendCommand.mockResolvedValue('line1\nline2');
+		const response = await (await findHandler('debug_log'))({ command: 'read' });
+
+		expect(mockSendCommand).toHaveBeenCalledWith("if {[info exists ::mcp_log]} { set result [join $::mcp_log \"\\n\"]; set ::mcp_log {}; return $result } { return {} }");
+		expect(response).toEqual({
+			content: [{ type: 'text', text: 'line1\nline2' }],
+			isError: false,
+		});
+	});
+
+	it('returns (empty) when the buffer has no messages', async () => {
+		mockSendCommand.mockResolvedValue('');
+		const response = await (await findHandler('debug_log'))({ command: 'read' });
+
+		expect(response).toEqual({
+			content: [{ type: 'text', text: '(empty)' }],
+			isError: false,
+		});
+	});
+
+	it('rejects log command without message', async () => {
+		const response = await (await findHandler('debug_log'))({ command: 'log' });
+
+		expect(response).toEqual({
+			content: [{ type: 'text', text: "Error: 'log' command requires a 'message' parameter." }],
+			isError: true,
+		});
+		expect(mockSendCommand).not.toHaveBeenCalled();
+	});
+
+	it('rejects unknown commands', async () => {
+		const response = await (await findHandler('debug_log'))({ command: 'unknown' });
+
+		expect(response).toEqual({
+			content: [{ type: 'text', text: 'Error: Unknown debug_log command "unknown".' }],
+			isError: true,
+		});
+		expect(mockSendCommand).not.toHaveBeenCalled();
+	});
+});
