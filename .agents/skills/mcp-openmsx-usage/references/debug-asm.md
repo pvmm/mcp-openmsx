@@ -203,7 +203,33 @@ Returns array of `{name, address, condition, command}`.
 debug_breakpoints { command: "remove", bpname: "bp#1" }
 ```
 
-### Resume execution (stops at next breakpoint)
+## Conditions
+
+Like breakpoints, but not tied to an address: a Tcl expression is evaluated continuously while the CPU runs, and the condition fires whenever it is true.
+
+### Create a condition
+
+```
+debug_conditions { command: "create", condition: "[reg SP] > 0xC000 && [reg B] != 0" }
+```
+
+Returns a name like `cond#1`. Optional params: `cmd` (Tcl command to run on trigger, default `debug break`), `once` (auto-remove after first trigger), `enabled` (set `false` to create disabled).
+
+### List all conditions
+
+```
+debug_conditions { command: "list" }
+```
+
+Returns array of `{name, condition, command, enabled, once}`.
+
+### Remove a condition
+
+```
+debug_conditions { command: "remove", condname: "cond#1" }
+```
+
+### Resume execution (stops at next breakpoint or condition)
 
 ```
 debug_run { command: "continue" }

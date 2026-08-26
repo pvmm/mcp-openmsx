@@ -44,6 +44,7 @@ beforeEach(() => {
 
 const BP_DELETEALL_TCL = 'foreach {bpname body} [debug breakpoint list] { debug breakpoint remove $bpname }';
 const WP_DELETEALL_TCL = 'foreach {wpname body} [debug watchpoint list] { debug watchpoint remove $wpname }';
+const COND_DELETEALL_TCL = 'foreach {condname body} [debug condition list] { debug condition remove $condname }';
 
 describe('debug_breakpoints deleteAll', () => {
 	it('sends the correct Tcl one-liner and reports success on empty list', async () => {
@@ -347,6 +348,150 @@ describe('debug_watchpoints commands', () => {
 
 		expect(response).toEqual({
 			content: [{ type: 'text', text: 'Error: Unknown watchpoint command "unknown".' }],
+			isError: true,
+		});
+		expect(mockSendCommand).not.toHaveBeenCalled();
+	});
+});
+
+describe('debug_conditions deleteAll', () => {
+	it('sends the correct Tcl one-liner and reports success on empty list', async () => {
+		mockSendCommand.mockResolvedValue('');
+		const handler = findHandler('debug_conditions');
+
+		const response = await handler({ command: 'deleteAll' });
+
+		expect(mockSendCommand).toHaveBeenCalledWith(COND_DELETEALL_TCL);
+		expect(response.isError).toBe(false);
+		expect(response.structuredContent).toEqual({
+			command: 'deleteAll',
+			result: 'All conditions removed.',
+		});
+	});
+
+	it('sends the same Tcl one-liner and reports success with multiple conditions', async () => {
+		const listResponse = [
+			'cond#1 {-condition {[reg A] == 0x42} -command {debug break} -enabled 1 -once 0}',
+			'cond#2 {-condition {[reg PC] < 0x8000} -command {puts hit} -enabled 1 -once 1}',
+		].join('\n');
+		mockSendCommand.mockResolvedValue(listResponse);
+		const handler = findHandler('debug_conditions');
+
+		const response = await handler({ command: 'deleteAll' });
+
+		expect(mockSendCommand).toHaveBeenCalledWith(COND_DELETEALL_TCL);
+		expect(response.isError).toBe(false);
+		expect(response.structuredContent).toEqual({
+			command: 'deleteAll',
+			result: 'All conditions removed.',
+		});
+	});
+});
+
+describe('debug_conditions commands', () => {
+	it('creates a condition with optional command and once flag', async () => {
+		mockSendCommand.mockResolvedValue('cond#7\n');
+		const response = await findHandler('debug_conditions')({
+			command: 'create',
+			condition: '[reg A] == 0x42',
+			cmd: 'debug break',
+			once: true,
+		});
+
+		expect(mockSendCommand).toHaveBeenCalledWith(
+			'debug condition create -condition {[reg A] == 0x42} -command {debug break} -once 1',
+		);
+		expect(response.structuredContent).toEqual({
+			command: 'create',
+			createdName: 'cond#7',
+		});
+		expect(response.isError).toBe(false);
+	});
+
+	it('creates a disabled condition without other optional flags', async () => {
+		mockSendCommand.mockResolvedValue('cond#3');
+		const response = await findHandler('debug_conditions')({
+			command: 'create',
+			condition: '[reg SP] > 0xC000',
+			enabled: false,
+		});
+
+		expect(mockSendCommand).toHaveBeenCalledWith(
+			'debug condition create -condition {[reg SP] > 0xC000} -enabled 0',
+		);
+		expect(response.structuredContent).toEqual({
+			command: 'create',
+			createdName: 'cond#3',
+		});
+	});
+
+	it('rejects creation without a condition expression', async () => {
+		const response = await findHandler('debug_conditions')({ command: 'create' });
+
+		expect(response).toEqual({
+			content: [{ type: 'text', text: "Error: 'condition' is required for create." }],
+			isError: true,
+		});
+		expect(mockSendCommand).not.toHaveBeenCalled();
+	});
+
+	it('removes a named condition', async () => {
+		mockSendCommand.mockResolvedValue('');
+		const response = await findHandler('debug_conditions')({ command: 'remove', condname: 'cond#1' });
+
+		expect(mockSendCommand).toHaveBeenCalledWith('debug condition remove cond#1');
+		expect(response.structuredContent).toEqual({
+			command: 'remove',
+			removedName: 'cond#1',
+			result: 'Ok',
+		});
+	});
+
+	it('parses the condition list into structured content', async () => {
+		const listResponse = [
+			'cond#1 {-condition {[reg A] == 0x42} -command {debug break} -enabled 1 -once 0}',
+			'cond#2 {-condition {[reg PC] < 0x8000 && [reg B] != 0} -command {puts hit} -enabled 0 -once 1}',
+		].join(' ');
+		mockSendCommand.mockResolvedValue(listResponse);
+		const response = await findHandler('debug_conditions')({ command: 'list' });
+
+		expect(mockSendCommand).toHaveBeenCalledWith('debug condition list');
+		expect(response.structuredContent).toEqual({
+			command: 'list',
+			conditions: [
+				{
+					name: 'cond#1',
+					condition: '[reg A] == 0x42',
+					command: 'debug break',
+					enabled: true,
+					once: false,
+				},
+				{
+					name: 'cond#2',
+					condition: '[reg PC] < 0x8000 && [reg B] != 0',
+					command: 'puts hit',
+					enabled: false,
+					once: true,
+				},
+			],
+		});
+	});
+
+	it('returns condition command errors', async () => {
+		mockSendCommand.mockResolvedValue('Error: invalid condition');
+		const response = await findHandler('debug_conditions')({ command: 'list' });
+
+		expect(response).toEqual({
+			content: [{ type: 'text', text: 'Error: invalid condition' }],
+			isError: true,
+		});
+	});
+
+	it('rejects unknown condition commands', async () => {
+		const response = await findHandler('debug_conditions')({ command: 'unknown' });
+
+		expect(response).toEqual({
+			content: [{ type: 'text', text: 'Error: Unknown condition command "unknown".' }],
 			isError: true,
 		});
 		expect(mockSendCommand).not.toHaveBeenCalled();
