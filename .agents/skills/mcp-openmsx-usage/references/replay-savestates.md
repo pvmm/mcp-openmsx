@@ -115,7 +115,7 @@ emu_savestates { command: "list" }
 2. **Break**: `debug_run { command: "break" }`
 3. **Check timeline**: `emu_replay { command: "status" }`
 4. **Go back**: `emu_replay { command: "goBack", seconds: 10 }`
-5. **Set breakpoint** near suspected cause: `debug_breakpoints { command: "create", address: "0x4100" }` — or, if the trigger is a state rather than a location, use a condition: `debug_conditions { command: "create", condition: "[reg HL] == 0x1234" }`
+5. **Set breakpoint** near suspected cause: `debug_breakpoints { command: "create", address: "0x4100" }` — or, if the trigger is a state rather than a location, use a condition: `debug_conditions { command: "create", condition: "[reg HL] == 0x1234" }` — or, to catch an unexpected memory write: `debug_watchpoints { command: "create", type: "write_mem", begin: "0x4100", end: "0x41FF" }`
 6. **Continue**: `debug_run { command: "continue" }`
 7. **Inspect at breakpoint**: `debug_cpu { command: "getCpuRegisters" }`, `debug_memory { command: "getBlock", ... }`
 8. **Step through**: `debug_run { command: "stepOver" }` — watch for the moment the bug occurs

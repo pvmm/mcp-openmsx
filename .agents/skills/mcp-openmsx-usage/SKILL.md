@@ -77,5 +77,6 @@ Detailed step-by-step guides for common workflows. ALWAYS load reference files i
 - Use `emu_savestates` to checkpoint progress during complex debugging sessions.
 - Addresses from `.sym`/`.map` files can be used directly with `debug_breakpoints.create` and `debug_run.runTo`.
 - Use `debug_conditions.create` when the trigger is a machine state rather than a location — a Tcl expression (e.g. `[reg SP] > 0xC000`) evaluated continuously while the CPU runs.
+- Use `debug_watchpoints.create` to catch unexpected memory or I/O access (e.g. stack corruption: `type: "write_mem", begin: "0xF000", end: "0xFFFF"`).
 - **MSX-DOS programs**: never set breakpoints before confirming the app is on screen — the BIOS/DOS boot fires them first. See [Debugging MSX-DOS Programs](references/debug-dos-program.md).
 - CP437 character encoding is the nearest encoding for MSX international charmap, use it for text input/output. Be mindful of special characters.

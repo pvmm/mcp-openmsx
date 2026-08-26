@@ -229,10 +229,36 @@ Returns array of `{name, condition, command, enabled, once}`.
 debug_conditions { command: "remove", condname: "cond#1" }
 ```
 
-### Resume execution (stops at next breakpoint or condition)
+### Resume execution (stops at next breakpoint, condition, or watchpoint)
 
 ```
 debug_run { command: "continue" }
+```
+
+## Watchpoints
+
+Trigger when a memory address or I/O port is read or written — useful for tracking stack corruption, VDP register writes, or unexpected memory accesses.
+
+### Create a watchpoint
+
+```
+debug_watchpoints { command: "create", type: "write_mem", begin: "0xC000", end: "0xFFF0", condition: "[reg A] != 0" }
+```
+
+Returns a name like `wp#1`. Types: `read_mem`, `write_mem` (4-digit hex addresses), `read_io`, `write_io` (2-digit hex ports). Optional params: `cmd`, `once`, `enabled`.
+
+### List all watchpoints
+
+```
+debug_watchpoints { command: "list" }
+```
+
+Returns array of `{name, type, address, condition, command, enabled, once}`.
+
+### Remove a watchpoint
+
+```
+debug_watchpoints { command: "remove", wpname: "wp#1" }
 ```
 
 ## Memory Operations

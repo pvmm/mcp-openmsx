@@ -184,6 +184,16 @@ debug_conditions { command: "create", condition: "[reg A] == 0xFF" }
 
 Conditions are not tied to an address: the expression is evaluated continuously and pauses execution whenever it becomes true. Use `once: true` to auto-remove after the first hit.
 
+### Watchpoint example
+
+To pause when a BASIC variable's memory is written to (useful for tracking changes to the BASIC interpreter's internal RAM):
+
+```
+debug_watchpoints { command: "create", type: "write_mem", begin: "0xC000", end: "0xEFFF" }
+```
+
+Watchpoints pause execution on memory or I/O access, even when the write originates inside the BASIC interpreter itself. Filter with `condition` to trigger only on specific values.
+
 ## Time-Travel Debugging for BASIC
 
 ### Go back in time to re-inspect

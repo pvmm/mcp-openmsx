@@ -1440,14 +1440,17 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 				condition: z.string()
 					.max(200, 'Condition too long')
 					.optional()
-					.describe("Tcl condition evaluated when watchpoint triggers. If false, watchpoint does not fire. Used by [create]."),
+					.describe("Tcl boolean expression evaluated when the watchpoint fires; it only fires when true. Examples: '[reg A] < 128', '[reg PC] >= 0x4000'. Used by [create]."),
 				cmd: z.string()
 					.max(200, 'Command too long')
 					.optional()
-					.describe("Tcl command to execute when watchpoint triggers. Used by [create]."),
+					.describe("Tcl command to execute when the watchpoint fires. Default if omitted: 'debug break'. Examples: 'puts hit', 'debug break'. Used by [create]."),
 				once: z.boolean()
 					.optional()
-					.describe("If true, remove watchpoint after first trigger. Used by [create]."),
+					.describe("If true, remove watchpoint after first trigger. Default: false (recurring). Used by [create]."),
+				enabled: z.boolean()
+					.optional()
+					.describe("Set to false to create the watchpoint disabled. Default: true. Used by [create]."),
 				wpname: z.string()
 					.min(3, 'Watchpoint name too short')
 					.max(10, 'Watchpoint name too long')
@@ -1484,7 +1487,7 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 			},
 		},
 		// Handler for the tool (function to be executed when the tool is called)
-		async ({ command, type, begin, end, condition, cmd, once, wpname }: { command: string; type?: string; begin?: string; end?: string; condition?: string; cmd?: string; once?: boolean; wpname?: string }) => {
+		async ({ command, type, begin, end, condition, cmd, once, enabled, wpname }: { command: string; type?: string; begin?: string; end?: string; condition?: string; cmd?: string; once?: boolean; enabled?: boolean; wpname?: string }) => {
 			let tclCommand: string;
 			switch (command) {
 				case "create": {
@@ -1502,10 +1505,11 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 					if (parseInt(begin, 16) > parseInt(end, 16)) {
 						return { content: [{ type: "text" as const, text: `Error: 'begin' (${begin}) must be <= 'end' (${end}).` }], isError: true };
 					}
-					const condPart = condition ? ` {${condition}}` : '';
-					const cmdPart = cmd ? ` {${cmd}}` : '';
-					const onceFlag = once ? ' -once' : '';
-					tclCommand = `debug set_watchpoint${onceFlag} ${type} {${begin} ${end}}${condPart}${cmdPart}`;
+					const condPart = condition ? ` -condition {${condition}}` : '';
+					const cmdPart = cmd ? ` -command {${cmd}}` : '';
+					const onceFlag = once ? ' -once 1' : '';
+					const enabledFlag = enabled === false ? ' -enabled 0' : '';
+					tclCommand = `debug watchpoint create -type ${type} -address {${begin} ${end}}${condPart}${cmdPart}${onceFlag}${enabledFlag}`;
 					break;
 				}
 				case "remove":
