@@ -17,7 +17,7 @@ metadata:
 
 `mcp-openmsx` is an MCP server that bridges AI assistants with the openMSX MSX emulator. It spawns openMSX, sending TCL commands via STDIO or HTTP transports.
 
-**Typical workflow**: launch emulator → insert media → interact (keyboard/BASIC/debug) → capture screen → close.
+**Typical workflow**: launch (or attach to) emulator → insert media → interact (keyboard/BASIC/debug) → capture screen → close.
 
 ## Prerequisites
 
@@ -35,7 +35,7 @@ metadata:
 - [MCP Configuration](skill-mcp-configuration.md): How to configure the MCP server, including transport selection (stdio vs HTTP), emulator executable path, and share directory settings.
 - [Environment Variables](skill-environment-variables.md)
 - MCP tools reference:
-    1. [Emulator Control](skill-tools-emulator-control.md): Manage emulator state (launch, power, reset), media (tapes, ROMs, disks), machine info, keyboard input, savestates, and time-travel replay.
+    1. [Emulator Control](skill-tools-emulator-control.md): Manage emulator state (launch, attach, power, reset), media (tapes, ROMs, disks), machine info, keyboard input, savestates, and time-travel replay.
     2. [VDP (Video Display Processor)](skill-tools-vdp-video-display-processor.md): Inspect and modify VDP state, including registers, palette, screen mode, and text content.
     3. [Screen Capture](skill-tools-screen-capture.md): Capture screenshots, and screen memory dumps from the emulator.
     4. [Debugging](skill-tools-debugging.md): Control execution (break, continue, step), inspect CPU registers, RAM, and VRAM, manage breakpoints.
@@ -51,7 +51,7 @@ metadata:
 Detailed step-by-step guides for common workflows. ALWAYS load reference files if there is even a small chance the content may be required. It's better to have the context than to miss a pattern or make a mistake. Read the relevant file when needed:
 
 - **[MSX documentation search workflow](references/documentation.md)** — Search and retrieve MSX technical documentation from the embedded vector database and resource library to support development tasks.
-- **[Launch and configure an MSX machine](references/launch-machine.md)** — Discover machines/extensions, launch, wait for boot, verify status, speed control, power cycle.
+- **[Launch and configure an MSX machine](references/launch-machine.md)** — Discover machines/extensions, launch (or attach to) an instance, wait for boot, verify status, speed control, power cycle.
 - **[Programming in MSX BASIC](references/basic-programming.md)** — Write, load, run, verify, and manage BASIC programs. Includes line management, interrupting, and loading large programs.
 - **[Debugging the VDP](references/debug-vdp.md)** — Inspect/modify VDP registers, palette, VRAM, screen modes. Includes sprite debugging and screen corruption analysis workflows.
 - **[Debugging a BASIC program](references/debug-basic.md)** — Interrupt execution, inspect state, edit lines, low-level interpreter debugging, time-travel, infinite loop detection, variable inspection.
@@ -69,6 +69,7 @@ Detailed step-by-step guides for common workflows. ALWAYS load reference files i
 - Use always `\r` (CR) as line terminators in BASIC programs. Avoid `\n` (LF) or `\r\n` (CRLF) to prevent parsing issues.
 - All addresses and values use hexadecimal format (e.g. `0x4000`, `0xA5`).
 - Always `emu_control.wait` a few seconds after `launch` to let the machine fully boot before interacting.
+- Prefer `emu_control.launch` to start a new emulator. Only use `emu_control.attach` when the user explicitly asks to connect to an already-running openMSX instance — attach skips auto-configuration (renderer, reverse replay, etc.).
 - Use `screen_shot.as_image` to visually verify emulator state at any point.
 - Use `debug_run.break` before `emu_replay.goBack` or `absoluteGoto` to keep the timeline stable.
 - Use `vector_db_query` to search MSX documentation before relying on general knowledge.

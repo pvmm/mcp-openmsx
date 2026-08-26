@@ -38,7 +38,7 @@ emu_control { command: "launch", machine: "C-BIOS_MSX2+", extensions: ["fmpac"] 
 - If `machine` is omitted, an elicitation form presents 6 default machines.
 - If the machine name is ambiguous, sampling finds best matches and presents an elicitation form.
 - On launch, the server automatically: spawns openMSX, sets `save_settings_on_exit off`, enables renderer `SDLGL-PP`, powers on, starts reverse replay mode.
-- Only **one** emulator instance can run at a time.
+- Only **one** emulator instance can be managed at a time (either launched or attached). Use [attach](#attach-to-existing-instance) to connect to an independently-launched openMSX instead.
 
 ### 3. Wait for boot
 
@@ -95,6 +95,37 @@ emu_control { command: "reset" }      # soft reset (keeps loaded media)
 emu_control { command: "powerOff" }   # power off
 emu_control { command: "powerOn" }    # power on
 ```
+
+## Attach to existing instance
+
+If openMSX is already running independently (e.g. launched from the command line), you can attach to it instead of launching a new one. Only do this when the user explicitly asks — attach skips auto-configuration (renderer, `save_settings_on_exit`, reverse replay) that `launch` sets up automatically.
+
+```
+emu_control { command: "attach" }
+```
+
+Without a `socketPath`, the server scans for running openMSX instances:
+- **Zero found**: returns a message suggesting to launch one first.
+- **One found**: auto-connects to it.
+- **Multiple found**: returns a list of instances (pid, socketPath, machineName) for you to present via elicitation, then reconnect with the chosen `socketPath`.
+
+To connect to a specific instance directly:
+
+```
+emu_control { command: "attach", socketPath: "/tmp/openmsx-user/socket.1234" }
+```
+
+On Linux, openMSX creates Unix domain sockets at `/tmp/openmsx-<username>/socket.<PID>` when launched normally (without `-control stdio`).
+
+### Detach
+
+Disconnect from an attached instance without closing it:
+
+```
+emu_control { command: "detach" }
+```
+
+The openMSX process keeps running. You can later re-attach or let the user continue using it directly.
 
 ## Closing
 

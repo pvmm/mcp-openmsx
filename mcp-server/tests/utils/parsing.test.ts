@@ -4,6 +4,7 @@ import {
   parseVdpRegs,
   parsePalette,
   parseBreakpoints,
+  parseWatchpoints,
   parseReplayStatus,
 } from '../../src/utils.js';
 
@@ -130,19 +131,59 @@ describe('parsePalette', () => {
 // ─── parseBreakpoints ────────────────────────────────────────────────────────
 
 describe('parseBreakpoints', () => {
-  it('parses multiple breakpoints', () => {
-    const input = 'bp#1 0x4000 {} {debug break}\nbp#2 0x8000 {} {debug break}';
-    const bps = parseBreakpoints(input);
-    expect(bps).toHaveLength(2);
-    expect(bps[0]).toEqual({ name: 'bp#1', address: '0x4000', condition: '', command: 'debug break' });
-    expect(bps[1]).toEqual({ name: 'bp#2', address: '0x8000', condition: '', command: 'debug break' });
-  });
-
-  it('parses breakpoint with condition', () => {
-    const input = 'bp#3 0xC000 {[reg A] == 0x42} {debug break}';
+  it('parses a single breakpoint with all fields', () => {
+    const input = 'bp#1 {-address 0x4000 -condition {[reg A] == 0x42} -command {debug break} -enabled 1 -once 0}';
     const bps = parseBreakpoints(input);
     expect(bps).toHaveLength(1);
-    expect(bps[0].condition).toBe('[reg A] == 0x42');
+    expect(bps[0]).toEqual({
+      name: 'bp#1', address: '0x4000',
+      condition: '[reg A] == 0x42', command: 'debug break', enabled: true, once: false,
+    });
+  });
+
+  it('parses multiple breakpoints on the same line', () => {
+    const input = 'bp#1 {-address 0x4000 -condition {} -command {} -enabled 1 -once 0} bp#2 {-address 0x8000 -condition {[reg B] > 3} -command {puts hi} -enabled 0 -once 1}';
+    const bps = parseBreakpoints(input);
+    expect(bps).toHaveLength(2);
+    expect(bps[0].name).toBe('bp#1');
+    expect(bps[0].condition).toBe('');
+    expect(bps[0].enabled).toBe(true);
+    expect(bps[0].once).toBe(false);
+    expect(bps[1].name).toBe('bp#2');
+    expect(bps[1].condition).toBe('[reg B] > 3');
+    expect(bps[1].command).toBe('puts hi');
+    expect(bps[1].enabled).toBe(false);
+    expect(bps[1].once).toBe(true);
+  });
+
+  it('parses multiple breakpoints separated by newlines', () => {
+    const input = 'bp#1 {-address 0x4000 -condition {} -command {debug break} -enabled 1 -once 0}\nbp#2 {-address 0x8000 -condition {} -command {debug break} -enabled 1 -once 0}';
+    const bps = parseBreakpoints(input);
+    expect(bps).toHaveLength(2);
+    expect(bps[0].name).toBe('bp#1');
+    expect(bps[1].name).toBe('bp#2');
+  });
+
+  it('parses empty condition and command', () => {
+    const input = 'bp#3 {-address 0xC000 -condition {} -command {} -enabled 1 -once 0}';
+    const bps = parseBreakpoints(input);
+    expect(bps).toHaveLength(1);
+    expect(bps[0].condition).toBe('');
+    expect(bps[0].command).toBe('');
+  });
+
+  it('parses escaped braces in condition and command', () => {
+    const input = 'bp#4 {-address 0x1234 -condition {\\{blah} -command {doh\\}} -enabled 1 -once 0}';
+    const bps = parseBreakpoints(input);
+    expect(bps[0].condition).toBe('\\{blah');
+    expect(bps[0].command).toBe('doh\\}');
+  });
+
+  it('parses braceless input in command and condition', () => {
+    const input = 'bp#4 {-address 0x1234 -condition foo -command bar -enabled 1 -once 0}';
+    const bps = parseBreakpoints(input);
+    expect(bps[0].condition).toBe('foo');
+    expect(bps[0].command).toBe('bar');
   });
 
   it('returns empty array for empty input', () => {
@@ -150,10 +191,120 @@ describe('parseBreakpoints', () => {
     expect(parseBreakpoints('   ')).toEqual([]);
   });
 
-  it('skips malformed lines', () => {
-    const input = 'bp#1 0x4000 {} {debug break}\ngarbage line\nbp#2 0x8000 {} {debug break}';
+  it('stops at malformed input', () => {
+    const input = 'bp#1 {-address 0x4000 -condition {} -command {debug break} -enabled 1 -once 0} garbage bp#2 {-address 0x8000 -condition {} -command {debug break} -enabled 1 -once 0}';
     const bps = parseBreakpoints(input);
-    expect(bps).toHaveLength(2);
+    expect(bps).toHaveLength(1);
+  });
+
+  it('uses defaults for missing breakpoint properties', () => {
+    expect(parseBreakpoints('bp#1 {}')).toEqual([{
+      name: 'bp#1', address: '', condition: '', command: '', enabled: false, once: false,
+    }]);
+  });
+});
+
+// ─── parseWatchpoints ──────────────────────────────────────────────────────
+
+describe('parseWatchpoints', () => {
+  it('parses a single watchpoint with all fields', () => {
+    const input = 'wp#1 {-type write_mem -address {0x4000 0x4FFF} -condition {[reg A] < 128} -command {debug break} -enabled 1 -once 0}';
+    const wps = parseWatchpoints(input);
+    expect(wps).toHaveLength(1);
+    expect(wps[0]).toEqual({
+      name: 'wp#1', type: 'write_mem', address: '0x4000 0x4FFF',
+      condition: '[reg A] < 128', command: 'debug break', enabled: true, once: false,
+    });
+  });
+
+  it('parses multiple watchpoints on the same line', () => {
+    const input = 'wp#1 {-type read_mem -address {1 4567} -condition {} -command {} -enabled 1 -once 0} wp#2 {-type write_io -address {0x98 0x98} -condition {} -command {puts hi} -enabled 0 -once 1}';
+    const wps = parseWatchpoints(input);
+    expect(wps).toHaveLength(2);
+    expect(wps[0].name).toBe('wp#1');
+    expect(wps[0].type).toBe('read_mem');
+    expect(wps[0].enabled).toBe(true);
+    expect(wps[0].once).toBe(false);
+    expect(wps[1].name).toBe('wp#2');
+    expect(wps[1].type).toBe('write_io');
+    expect(wps[1].enabled).toBe(false);
+    expect(wps[1].once).toBe(true);
+  });
+
+  it('parses multiple watchpoints separated by newlines', () => {
+    const input = 'wp#1 {-type read_mem -address {1 4567} -condition {} -command {} -enabled 1 -once 0}\nwp#2 {-type write_io -address {0x98 0x98} -condition {} -command {puts hi} -enabled 0 -once 1}';
+    const wps = parseWatchpoints(input);
+    expect(wps).toHaveLength(2);
+    expect(wps[0].name).toBe('wp#1');
+    expect(wps[1].name).toBe('wp#2');
+  });
+
+  it('parses empty condition and command', () => {
+    const input = 'wp#1 {-type read_io -address {0x98 0x98} -condition {} -command {} -enabled 1 -once 0}';
+    const wps = parseWatchpoints(input);
+    expect(wps).toHaveLength(1);
+    expect(wps[0].condition).toBe('');
+    expect(wps[0].command).toBe('');
+  });
+
+  it('parses braced address list', () => {
+    const input = 'wp#1 {-type read_mem -address {0x8000 0x9FFF} -condition {} -command {} -enabled 1 -once 0}';
+    const wps = parseWatchpoints(input);
+    expect(wps[0].address).toBe('0x8000 0x9FFF');
+  });
+
+  it('parses simple string in address', () => {
+    const input = 'wp#1 {-type read_mem -address xyz -condition {} -command {} -enabled 1 -once 0}';
+    const wps = parseWatchpoints(input);
+    expect(wps[0].address).toBe('xyz');
+  });
+
+  it('parses escaped string in address', () => {
+    const input = 'wp#1 {-type read_mem -address {{xyz\ blah}} -condition {} -command {} -enabled 1 -once 0}';
+    const wps = parseWatchpoints(input);
+    expect(wps[0].address).toBe('{xyz\ blah}');
+  });
+
+  it('parses escaped braces in address', () => {
+    const input = 'wp#1 {-type read_mem -address {\\}xxx yyy\\{} -condition {} -command {} -enabled 1 -once 0}';
+    const wps = parseWatchpoints(input);
+    expect(wps[0].address).toBe('\\}xxx yyy\\{');
+  });
+
+  it('parses escaped braces in condition', () => {
+    const input = 'wp#1 {-type read_mem -address {1 100} -condition {\\{blah} -command {} -enabled 1 -once 0}';
+    const wps = parseWatchpoints(input);
+    expect(wps[0].condition).toBe('\\{blah');
+  });
+
+  it('parses condition and command with content', () => {
+    const input = 'wp#1 {-type write_mem -address {0xC000 0xC000} -condition {[reg A] == 0x42} -command {debug break} -enabled 1 -once 0}';
+    const wps = parseWatchpoints(input);
+    expect(wps[0].condition).toBe('[reg A] == 0x42');
+    expect(wps[0].command).toBe('debug break');
+  });
+
+  it('returns empty array for empty input', () => {
+    expect(parseWatchpoints('')).toEqual([]);
+    expect(parseWatchpoints('   ')).toEqual([]);
+  });
+
+  it('stops at malformed input', () => {
+    const input = 'wp#1 {-type read_mem -address {1 100} -condition {} -command {} -enabled 1 -once 0} garbage wp#2 {-type read_io -address {0x98 0x98} -condition {} -command {} -enabled 1 -once 0}';
+    const wps = parseWatchpoints(input);
+    expect(wps).toHaveLength(1);
+  });
+
+  it('handles missing values and malformed Tcl blocks', () => {
+    expect(parseWatchpoints('wp#1 {-type}')[0]).toEqual({
+      name: 'wp#1', type: '', address: '', condition: '', command: '', enabled: false, once: false,
+    });
+    expect(parseWatchpoints('wp#2 {')[0]).toEqual({
+      name: 'wp#2', type: '', address: '', condition: '', command: '', enabled: false, once: false,
+    });
+    expect(parseWatchpoints('wp#3 garbage')).toEqual([]);
+    expect(parseWatchpoints('wp#4 {-type read_mem   }')[0].type).toBe('read_mem');
+    expect(parseWatchpoints('wp#5 {garbage}')[0].type).toBe('');
   });
 });
 

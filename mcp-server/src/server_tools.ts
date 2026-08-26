@@ -11,7 +11,7 @@ import fs from "fs/promises";
 import path from "path";
 import { openMSXInstance } from "./openmsx.js";
 import { VectorDB } from "./vectordb.js";
-import { encodeTypeText, buildKeyComboCommand, isErrorResponse, getResponseContent, parseCpuRegs, is16bitRegister, parseVdpRegs, parsePalette, parseBreakpoints, parseReplayStatus, sleepWithAbort, ensureDirectoryExists, tclPath } from "./utils.js";
+import { encodeTypeText, buildKeyComboCommand, isErrorResponse, getResponseContent, parseCpuRegs, is16bitRegister, parseVdpRegs, parsePalette, parseBreakpoints, parseWatchpoints, parseReplayStatus, sleepWithAbort, ensureDirectoryExists, tclPath } from "./utils.js";
 import { EmuDirectories } from "./server.js";
 import { RegResource, getRegisteredResourcesList } from "./server_resources.js";
 import { resolveLaunchParams } from "./server_elicitations.js";
@@ -85,9 +85,9 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 			// Schema for the tool (input validation)
 			inputSchema: {
 				command: z.enum(["launch", "close", "powerOn", "powerOff", "reset", "getEmulatorSpeed", "setEmulatorSpeed",
-						"machineList", "extensionList", "wait"])
+						"machineList", "extensionList", "wait", "userDataDir", "systemDataDir", "attach", "detach"])
 					.describe(`Available commands:
-'launch [machine] [extensions]': opens a powered-on openMSX emulator; you must wait some time waiting the machine is fully booted; machine and extensions parameters can be specified so use 'machineList' and 'extensionList' commands to obtain valid values, or let them ambiguous and use elicitation. " +
+'launch [machine] [extensions]': opens a powered-on openMSX emulator; you must wait some time waiting the machine is fully booted; machine and extensions parameters can be specified so use 'machineList' and 'extensionList' commands to obtain valid values, or let them ambiguous and use elicitation.
 'close': closes the openMSX emulator.
 'powerOn': powers on the openMSX emulator.
 'powerOff': powers off the openMSX emulator.
@@ -97,6 +97,10 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 'machineList': gets a list of all available MSX machines that can be emulated with openMSX.
 'extensionList': gets a list of all available MSX extensions that can be used with openMSX.
 'wait <seconds>': performs a wait for the specified number of seconds, default is 3.
+'userDataDir': returns the openMSX user data directory path.
+'systemDataDir': returns the openMSX system data directory path.
+'attach [socketPath]': connects to a running openMSX instance. Without socketPath, scans for running instances and returns a list. With socketPath, connects to that specific instance.
+'detach': disconnects from an attached openMSX instance without closing it.
 `),
 				machine: z.string()
 					.max(100, 'Machine name too long')
@@ -119,6 +123,10 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 					.optional()
 					.default(3)
 					.describe("Number of seconds to wait; default is 3. Used by [wait]."),
+				socketPath: z.string()
+					.min(1, 'Socket path cannot be empty')
+					.optional()
+					.describe("Path to the Unix domain socket (Linux/macOS) or socket file (Windows) of a running openMSX instance. Used by [attach]."),
 			},
 			outputSchema: {
 				command: z.string().describe("The command that was executed."),
@@ -134,6 +142,12 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 					description: z.string().describe("Extension description."),
 				})).optional()
 					.describe("List of available MSX extensions. Present for 'extensionList'."),
+				instances: z.array(z.object({
+					pid: z.number().describe("Process ID of the openMSX instance."),
+					socketPath: z.string().describe("Path to the control socket file."),
+					machineName: z.string().describe("Name of the emulated machine."),
+				})).optional()
+					.describe("List of running openMSX instances. Present for 'attach' when multiple instances are found."),
 				result: z.string().optional()
 					.describe("Generic result or status message."),
 			},
@@ -145,8 +159,9 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 			},
 		},
 		// Handler for the tool (function to be executed when the tool is called)
-		async ({ command, machine, extensions, emuspeed, seconds }: { command: string, machine?: string; extensions?: string[]; emuspeed?: number, seconds?: number }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+		async ({ command, machine, extensions, emuspeed, seconds, socketPath }: { command: string, machine?: string; extensions?: string[]; emuspeed?: number, seconds?: number, socketPath?: string }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
 			let result = '';
+			let attachInstances: { pid: number; socketPath: string; machineName: string }[] | undefined;
 			switch (command) {
 				case "launch": {
 					const resolved = await resolveLaunchParams(server, emuDirectories, machine, extensions);
@@ -214,6 +229,35 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 					}
 					break;
 				}
+				case "userDataDir":
+					result = await openMSXInstance.sendCommand('set $env(OPENMSX_USER_DATA)');
+					break;
+				case "systemDataDir":
+					result = await openMSXInstance.sendCommand('set $env(OPENMSX_SYSTEM_DATA)');
+					break;
+				case "attach": {
+					if (socketPath) {
+						// Connect to the specified socket directly
+						result = await openMSXInstance.emu_connect(socketPath);
+					} else {
+						// Scan for running instances
+						const instances = await openMSXInstance.scanRunningInstances();
+						if (instances.length === 0) {
+							result = "No running openMSX instances found. Launch one first with [launch].";
+						} else if (instances.length === 1) {
+							// Auto-connect to the only instance
+							result = await openMSXInstance.emu_connect(instances[0].socketPath);
+						} else {
+							// Return list for agent to present via elicitation
+							result = `Found ${instances.length} running openMSX instances. Use elicitation to ask the user which one to connect to, then call [attach] with the chosen socketPath.`;
+							attachInstances = instances;
+						}
+					}
+					break;
+				}
+				case "detach":
+					result = await openMSXInstance.emu_close();
+					break;
 				default:
 					result = `Error: Unknown command "${command}".`;
 					break;
@@ -246,6 +290,14 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 						const extensions = JSON.parse(result);
 						structuredContent = { command, extensions };
 					} catch {
+						structuredContent = { command, result };
+					}
+					break;
+				}
+				case 'attach': {
+					if (attachInstances) {
+						structuredContent = { command, instances: attachInstances, result };
+					} else {
 						structuredContent = { command, result };
 					}
 					break;
@@ -819,7 +871,7 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 				address: z.string()
 					.regex(/^0x[0-9a-fA-F]{4}$/, 'Address must be a 4 digits hexadecimal number')
 					.optional()
-					.describe("4 hexadecimal digits for a memory address (e.g. 0x4af3). Used by [getBlock, readByte, writeByte, readWord, writeWord]"),
+					.describe("4 hexadecimal digits for a memory address (e.g. 0x4af3). Used by [getBlock, readByte, writeByte, readWord, writeWord, writeBlock]"),
 				lines: z.number()
 					.min(1, 'Minimum number of lines too low')
 					.max(50, 'Maximum number of lines too high')
@@ -896,9 +948,17 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 				case "writeWord":
 					tclCommand = `poke16 ${address} ${value16}`;
 					break;
-				case "writeBlock":
-					tclCommand = `set addr ${address}; foreach v { ${values} } { poke $addr $v; incr addr }`;
+				case "writeBlock": {
+					if (!address || !values) {
+						return {
+							content: [{ type: "text" as const, text: "Error: 'writeBlock' requires both 'address' and 'values'." }],
+							isError: true,
+						};
+					}
+					const valuesList = values.trim();
+					tclCommand = `set addr ${address}; foreach v { ${valuesList} } { poke $addr $v; incr addr }`;
 					break;
+				}
 				case "searchBytes":
 					length = parseInt(address!, 16) + length! > 0x10000 ? 0x10000 - parseInt(address!, 16) : length;
 					tclCommand = `set pattern { ${values} }
@@ -1114,13 +1174,14 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 			description: "Create, remove, and list breakpoints.",
 			// Schema for the tool (input validation)
 			inputSchema: {
-				command: z.enum(["create", "remove", "list"])
+				command: z.enum(["create", "remove", "list", "deleteAll"])
 					.describe(`Available commands:
-	'create <address>': create a breakpoint at a specified address, and returns its name.
+	'create <address>': create a breakpoint at a specified address, and returns its name. Optional params: 'condition', 'cmd', 'once'.
 	'remove <bpname>': remove a breakpoint by name (e.g. bp#1).
 	'list': enumerate the active breakpoints.
-"**Important Note**: Addresses and values are in hexadecimal format (e.g. 0x4af3).
-"**Important Note**: The memory addresses of functions and variables can be previously obtained from *.sym or *.map files.
+	'deleteAll': remove all active breakpoints at once.
+**Important Note**: Addresses and values are in hexadecimal format (e.g. 0x4af3).
+**Important Note**: The memory addresses of functions and variables can be previously obtained from *.sym or *.map files.
 `),
 				address: z.string()
 					.regex(/^0x[0-9a-fA-F]{4}$/, 'Address must be a 4 digits hexadecimal number')
@@ -1131,6 +1192,17 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 					.max(10, 'Breakpoint name too long')
 					.optional()
 					.describe("Breakpoint name (e.g. bp#1). Used by [remove]"),
+				condition: z.string()
+					.max(200, 'Condition too long')
+					.optional()
+					.describe("Tcl boolean expression evaluated when the breakpoint hits; it only fires when true. Omit for an unconditional breakpoint. Examples: '[reg A] == 0x42', '[reg PC] < 0x8000'. Used by [create]."),
+				cmd: z.string()
+					.max(200, 'Command too long')
+					.optional()
+					.describe("Tcl command to execute when the breakpoint hits. Default if omitted: 'debug break'. Examples: 'puts hit', 'debug break'. Used by [create]."),
+				once: z.boolean()
+					.optional()
+					.describe("If true, remove breakpoint after first trigger. Used by [create]."),
 			},
 			// Structured output schema (MCP protocol 2025-11-25)
 			outputSchema: {
@@ -1143,31 +1215,42 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 				removedName: z.string().optional()
 					.describe("Name of the removed breakpoint. Present for 'remove'."),
 				breakpoints: z.array(z.object({
-					name: z.string(), address: z.string(), condition: z.string(), command: z.string()
+					name: z.string(), address: z.string(), condition: z.string(), command: z.string(),
+					enabled: z.boolean(), once: z.boolean()
 				})).optional()
 					.describe("List of active breakpoints. Present for 'list'."),
 				result: z.string().optional()
 					.describe("Generic result or status message."),
 			},
 			annotations: {
-				"readOnlyHint": true,
+				"readOnlyHint": false,
 				"destructiveHint": false,
 				"idempotentHint": false,
 				"openWorldHint": false,
 			},
 		},
 		// Handler for the tool (function to be executed when the tool is called)
-		async ({ command, address, bpname }: { command: string; address?: string; bpname?: string }) => {
+		async ({ command, address, bpname, condition, cmd, once }: { command: string; address?: string; bpname?: string; condition?: string; cmd?: string; once?: boolean }) => {
 			let tclCommand: string;
 			switch (command) {
-				case "create":
-					tclCommand = `debug set_bp ${address}`;
+				case "create": {
+					if (!address) {
+						return { content: [{ type: "text" as const, text: "Error: 'address' is required for create." }], isError: true };
+					}
+					const condPart = condition ? ` -condition {${condition}}` : '';
+					const cmdPart = cmd ? ` -command {${cmd}}` : '';
+					const onceFlag = once ? ' -once 1' : '';
+					tclCommand = `debug breakpoint create -address ${address}${condPart}${cmdPart}${onceFlag}`;
 					break;
+				}
 				case "remove":
-					tclCommand = `debug remove_bp ${bpname}`;
+					tclCommand = `debug breakpoint remove ${bpname}`;
 					break;
 				case "list":
-					tclCommand = 'debug list_bp';
+					tclCommand = 'debug breakpoint list';
+					break;
+				case "deleteAll":
+					tclCommand = 'foreach {bpname body} [debug breakpoint list] { debug breakpoint remove $bpname }';
 					break;
 				default:
 					return { content: [{ type: "text" as const, text: `Error: Unknown breakpoint command "${command}".` }], isError: true };
@@ -1190,6 +1273,154 @@ export async function registerTools(server: McpServer, emuDirectories: EmuDirect
 				case "list": {
 					const bps = parseBreakpoints(response);
 					structuredContent = { command, breakpoints: bps };
+					break;
+				}
+				case "deleteAll": {
+					structuredContent = { command, result: "All breakpoints removed." };
+					break;
+				}
+				default:
+					structuredContent = { command, result: response };
+			}
+			return {
+				content: [{ type: "text" as const, text: response || "Ok" }],
+				structuredContent,
+				isError: false,
+			};
+		});
+
+	// debug_watchpoints
+	server.registerTool(
+		// Name of the tool (used to call it)
+		"debug_watchpoints",
+		{
+			title: "Watchpoints tools",
+			// Description of the tool (what it does)
+			description: "Create, remove, and list watchpoints. Watchpoints trigger when a memory address or I/O port is read or written.",
+			// Schema for the tool (input validation)
+			inputSchema: {
+				command: z.enum(["create", "remove", "list", "deleteAll"])
+					.describe(`Available commands:
+	'create <type> <begin> <end>': create a watchpoint with an address/port range. Type must be one of: 'read_mem', 'write_mem' (4-digit hex addresses), 'read_io', 'write_io' (2-digit hex ports). begin must be <= end. Optional params: 'condition', 'cmd', 'once'.
+	'remove <wpname>': remove a watchpoint by name (e.g. wp#1).
+	'list': enumerate the active watchpoints.
+	'deleteAll': remove all active watchpoints at once.
+**Important Note**: Addresses and values are in hexadecimal format (e.g. 0x0000).
+`),
+				type: z.enum(["read_mem", "write_mem", "read_io", "write_io"])
+					.optional()
+					.describe("Watchpoint type. Used by [create]."),
+				begin: z.string()
+					.optional()
+					.describe("Start of address/port range. 4 hex digits for memory (e.g. 0x4af3), 2 hex digits for I/O (e.g. 0x98). Used by [create]."),
+				end: z.string()
+					.optional()
+					.describe("End of address/port range. 4 hex digits for memory (e.g. 0x4af3), 2 hex digits for I/O (e.g. 0x98). Must be >= begin. Used by [create]."),
+				condition: z.string()
+					.max(200, 'Condition too long')
+					.optional()
+					.describe("Tcl condition evaluated when watchpoint triggers. If false, watchpoint does not fire. Used by [create]."),
+				cmd: z.string()
+					.max(200, 'Command too long')
+					.optional()
+					.describe("Tcl command to execute when watchpoint triggers. Used by [create]."),
+				once: z.boolean()
+					.optional()
+					.describe("If true, remove watchpoint after first trigger. Used by [create]."),
+				wpname: z.string()
+					.min(3, 'Watchpoint name too short')
+					.max(10, 'Watchpoint name too long')
+					.optional()
+					.describe("Watchpoint name (e.g. wp#1). Used by [remove]"),
+			},
+			// Structured output schema (MCP protocol 2025-11-25)
+			outputSchema: {
+				command: z.string()
+					.describe("The executed command name."),
+				createdName: z.string().optional()
+					.describe("Name assigned to the newly created watchpoint (e.g. 'wp#1'). Present for 'create'."),
+				createdBegin: z.string().optional()
+					.describe("Start of address/port range. Present for 'create'."),
+				createdEnd: z.string().optional()
+					.describe("End of address/port range. Present for 'create'."),
+				createdType: z.string().optional()
+					.describe("Type of the newly created watchpoint. Present for 'create'."),
+				removedName: z.string().optional()
+					.describe("Name of the removed watchpoint. Present for 'remove'."),
+				watchpoints: z.array(z.object({
+					name: z.string(), type: z.string(), address: z.string(), condition: z.string(), command: z.string(),
+					enabled: z.boolean(), once: z.boolean()
+				})).optional()
+					.describe("List of active watchpoints. Present for 'list'."),
+				result: z.string().optional()
+					.describe("Generic result or status message."),
+			},
+			annotations: {
+				"readOnlyHint": false,
+				"destructiveHint": false,
+				"idempotentHint": false,
+				"openWorldHint": false,
+			},
+		},
+		// Handler for the tool (function to be executed when the tool is called)
+		async ({ command, type, begin, end, condition, cmd, once, wpname }: { command: string; type?: string; begin?: string; end?: string; condition?: string; cmd?: string; once?: boolean; wpname?: string }) => {
+			let tclCommand: string;
+			switch (command) {
+				case "create": {
+					if (!type || !begin || !end) {
+						return { content: [{ type: "text" as const, text: "Error: 'type', 'begin', and 'end' are required for create." }], isError: true };
+					}
+					const isMem = type === "read_mem" || type === "write_mem";
+					const hexRegex = isMem ? /^0x[0-9a-fA-F]{4}$/ : /^0x[0-9a-fA-F]{2}$/;
+					if (!hexRegex.test(begin)) {
+						return { content: [{ type: "text" as const, text: `Error: 'begin' must be a 4-digit hex address for memory or 2-digit hex port for I/O (e.g. 0x${isMem ? '4af3' : '98'}).` }], isError: true };
+					}
+					if (!hexRegex.test(end)) {
+						return { content: [{ type: "text" as const, text: `Error: 'end' must be a 4-digit hex address for memory or 2-digit hex port for I/O (e.g. 0x${isMem ? '4af3' : '98'}).` }], isError: true };
+					}
+					if (parseInt(begin, 16) > parseInt(end, 16)) {
+						return { content: [{ type: "text" as const, text: `Error: 'begin' (${begin}) must be <= 'end' (${end}).` }], isError: true };
+					}
+					const condPart = condition ? ` {${condition}}` : '';
+					const cmdPart = cmd ? ` {${cmd}}` : '';
+					const onceFlag = once ? ' -once' : '';
+					tclCommand = `debug set_watchpoint${onceFlag} ${type} {${begin} ${end}}${condPart}${cmdPart}`;
+					break;
+				}
+				case "remove":
+					tclCommand = `debug watchpoint remove ${wpname}`;
+					break;
+				case "list":
+					tclCommand = 'debug watchpoint list';
+					break;
+				case "deleteAll":
+					tclCommand = 'foreach {wpname body} [debug watchpoint list] { debug watchpoint remove $wpname }';
+					break;
+				default:
+					return { content: [{ type: "text" as const, text: `Error: Unknown watchpoint command "${command}".` }], isError: true };
+			}
+			const response = await openMSXInstance.sendCommand(tclCommand);
+			if (isErrorResponse(response)) {
+				return { content: [{ type: "text" as const, text: response }], isError: true };
+			}
+
+			let structuredContent: Record<string, unknown>;
+			switch (command) {
+				case "create": {
+					structuredContent = { command, createdName: response.trim(), createdBegin: begin, createdEnd: end, createdType: type };
+					break;
+				}
+				case "remove": {
+					structuredContent = { command, removedName: wpname, result: response || "Ok" };
+					break;
+				}
+				case "list": {
+					const wps = parseWatchpoints(response);
+					structuredContent = { command, watchpoints: wps };
+					break;
+				}
+				case "deleteAll": {
+					structuredContent = { command, result: "All watchpoints removed." };
 					break;
 				}
 				default:

@@ -23,7 +23,7 @@ Debug an MSX BASIC program by inspecting its state, stepping through execution a
 
 ## Prerequisites
 
-- Machine launched with BASIC support (branded machine, NOT C-BIOS).
+- Machine launched (or attached via `emu_control.attach`) with BASIC support (branded machine, NOT C-BIOS).
 - BASIC program already loaded via [`basic_programming.setProgram`](../skill-tools-basic-programming.md).
 
 ## Resources

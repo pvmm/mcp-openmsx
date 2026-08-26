@@ -485,29 +485,117 @@ export function parsePalette(response: string): { index: number; r: number; g: n
 }
 
 /**
- * Parse the output of the openMSX 'debug list_bp' TCL command into a structured array.
+ * Parse the output of the openMSX 'debug breakpoint list' TCL command into a structured array.
  * Output format:
- *  bp#1 0x4000 {} {debug break}
- *  bp#2 0x8000 {} {debug break}
- * @param response - Raw text response from the debug list_bp command
+ *   bp#1 {-address 0x4000 -condition {} -command {debug break} -enabled 1 -once 0}
+ * @param response - Raw text response from the debug breakpoint list command
  * @returns Array of breakpoint objects
  */
-export function parseBreakpoints(response: string): { name: string; address: string; condition: string; command: string }[] {
-	if (!response.trim()) return [];
-	const breakpoints: { name: string; address: string; condition: string; command: string }[] = [];
-	const lines = response.trim().split('\n');
-	for (const line of lines) {
-		const match = line.match(/^(\S+)\s+(0x[0-9a-fA-F]{4})\s+\{([^}]*)\}\s+\{([^}]*)\}/);
-		if (match) {
-			breakpoints.push({
-				name: match[1],
-				address: match[2],
-				condition: match[3],
-				command: match[4],
-			});
+export type BreakpointInfo = { name: string; address: string; condition: string; command: string; enabled: boolean; once: boolean };
+
+export function parseBreakpoints(response: string): BreakpointInfo[] {
+	return parseNamedDictList(response.trim(), /^bp#\d+/).map(({ name, props }) => ({
+		name,
+		address: props['address'] ?? '',
+		condition: props['condition'] ?? '',
+		command: props['command'] ?? '',
+		enabled: props['enabled'] === '1',
+		once: props['once'] === '1',
+	}));
+}
+
+/**
+ * Parse the output of the openMSX 'debug watchpoint list' TCL command into a structured array.
+ * Output format:
+ *   wp#1 {-type write_mem -address {1 4567} -condition {[reg A] < 128} -command {debug break} -enabled 1 -once 0}
+ */
+
+export type WatchpointInfo = { name: string; type: string; address: string; condition: string; command: string; enabled: boolean; once: boolean };
+
+function parseTclBraced(input: string, idx: number): { value: string; endIdx: number } {
+	if (input[idx] !== '{') return { value: '', endIdx: idx };
+	let depth = 1;
+	let i = idx + 1;
+	const start = i;
+	while (i < input.length && depth > 0) {
+		if (input[i] === '\\' && i + 1 < input.length && (input[i + 1] === '{' || input[i + 1] === '}')) {
+			i += 2; // skip escaped brace
+		} else if (input[i] === '{') {
+			depth++;
+			i++;
+		} else if (input[i] === '}') {
+			depth--;
+			if (depth > 0) i++;
+		} else {
+			i++;
 		}
 	}
-	return breakpoints;
+	const endIdx = depth === 0 ? i + 1 : i;
+	return { value: input.substring(start, i), endIdx };
+}
+
+function parseTclValue(input: string, idx: number): { value: string; endIdx: number } {
+	while (idx < input.length && /\s/.test(input[idx])) idx++;
+	if (idx >= input.length) return { value: '', endIdx: idx };
+	if (input[idx] === '{') return parseTclBraced(input, idx);
+	const start = idx;
+	while (idx < input.length && !/\s/.test(input[idx])) idx++;
+	return { value: input.substring(start, idx), endIdx: idx };
+}
+
+export function parseWatchpoints(response: string): WatchpointInfo[] {
+	return parseNamedDictList(response.trim(), /^wp#\d+/).map(({ name, props }) => ({
+		name,
+		type: props['type'] ?? '',
+		address: props['address'] ?? '',
+		condition: props['condition'] ?? '',
+		command: props['command'] ?? '',
+		enabled: props['enabled'] === '1',
+		once: props['once'] === '1',
+	}));
+}
+
+/**
+ * Parse a sequence of `<id> {-key <value> ...}` entries (a Tcl dict of dicts, as
+ * returned by 'debug breakpoint list' / 'debug watchpoint list') into id + props pairs.
+ * Stops at the first malformed entry.
+ */
+function parseNamedDictList(input: string, nameRegex: RegExp): Array<{ name: string; props: Record<string, string> }> {
+	const entries: Array<{ name: string; props: Record<string, string> }> = [];
+	let idx = 0;
+	while (idx < input.length) {
+		// skip whitespace
+		while (idx < input.length && /\s/.test(input[idx])) idx++;
+		if (idx >= input.length) break;
+		// expect e.g. bp#N / wp#N
+		const nameMatch = input.substring(idx).match(nameRegex);
+		if (!nameMatch) break;
+		const name = nameMatch[0];
+		idx += name.length;
+		// parse the braced block
+		while (idx < input.length && input[idx] === ' ') idx++;
+		if (idx >= input.length || input[idx] !== '{') break;
+		const block = parseTclBraced(input, idx);
+		idx = block.endIdx;
+		// parse key-value pairs inside the block
+		const props: Record<string, string> = {};
+		let bidx = 0;
+		const content = block.value;
+		while (bidx < content.length) {
+			while (bidx < content.length && content[bidx] === ' ') bidx++;
+			if (bidx >= content.length) break;
+			if (content[bidx] !== '-') break;
+			bidx++; // skip '-'
+			const keyStart = bidx;
+			while (bidx < content.length && content[bidx] !== ' ') bidx++;
+			const key = content.substring(keyStart, bidx);
+			const val = parseTclValue(content, bidx);
+			props[key] = val.value;
+			bidx = val.endIdx;
+		}
+		entries.push({ name, props });
+	}
+	return entries;
 }
 
 /**
