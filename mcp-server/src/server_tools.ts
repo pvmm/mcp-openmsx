@@ -2152,6 +2152,54 @@ The parameter scrbasename is the name of the filename (without path) to save the
 		}
 	);
 
+	// debug_log
+	server.registerTool(
+		"debug_log",
+		{
+			title: "Debug log",
+			description: `Log messages to and read messages from the openMSX Tcl interpreter.
+The 'log' command appends a message to the global ::mcp_log list.
+The 'read' command reads all accumulated messages and clears the buffer.
+Useful for getting diagnostic output from Tcl scripts without requiring the raw Tcl command tool.`,
+			inputSchema: {
+				command: z.enum(["log", "read"])
+					.describe("'log': append a message to the log buffer. 'read': read all accumulated messages and clear the buffer."),
+				message: z.string().optional()
+					.describe("Message to log (required for 'log' command)."),
+			},
+			annotations: {
+				"readOnlyHint": false,
+				"destructiveHint": false,
+				"idempotentHint": false,
+				"openWorldHint": false,
+			},
+		},
+		async ({ command, message }: { command: string; message?: string }) => {
+			let tclCommand: string;
+			switch (command) {
+				case "log":
+					if (!message) {
+						return getResponseContent([
+							"Error: 'log' command requires a 'message' parameter."
+						]);
+					}
+					tclCommand = `lappend ::mcp_log {${message.replace(/\\/g, '\\\\').replace(/{/g, '\\{').replace(/}/g, '\\}')}}`;
+					break;
+				case "read":
+					tclCommand = "if {[info exists ::mcp_log]} { set result [join $::mcp_log \"\\n\"]; set ::mcp_log {}; return $result } { return {} }";
+					break;
+				default:
+					return getResponseContent([
+						`Error: Unknown debug_log command "${command}".`
+					]);
+			}
+			const response = await openMSXInstance.sendCommand(tclCommand);
+			return getResponseContent([
+				response || "(empty)"
+			]);
+		}
+	);
+
 	// vector_db_query
 	server.registerTool(
 		// Name of the tool (used to call it)

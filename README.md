@@ -110,6 +110,7 @@ The MCP server translates high-level natural language commands from your Copilot
 - `debug_breakpoints`: Breakpoint management: _`create`, `remove`, `list`_.
 - `debug_conditions`: Condition management (like breakpoints, but not tied to an address — a Tcl expression evaluated continuously while the CPU runs): _`create`, `remove`, `list`_.
 - `debug_watchpoints`: Watchpoint management (trigger when a memory address or I/O port is read/written): _`create`, `remove`, `list`_.
+- `debug_log`: Debug log: _`log`, `read`_.
 
 ### Automation Tools
 - `emu_keyboard`: Send text or key combinations to emulator: _`sendText`, `sendKeyCombo`_.
