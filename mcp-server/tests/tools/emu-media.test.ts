@@ -48,8 +48,10 @@ describe('emu_media command routing', () => {
 		['tapeRewind', {}, 'cassetteplayer rewind'],
 		['tapeEject', {}, 'cassetteplayer eject'],
 		['romInsert', { romfile: '/tmp/game.rom' }, 'carta insert "/tmp/game.rom"'],
+		['romInsert', { romfile: '/tmp/game.rom', ips: '/tmp/game.ips' }, 'carta insert "/tmp/game.rom" -ips "/tmp/game.ips"'],
 		['romEject', {}, 'carta eject'],
 		['diskInsert', { diskfile: '/tmp/game.dsk' }, 'diska insert "/tmp/game.dsk"'],
+		['diskInsert', { diskfile: '/tmp/game.dsk', ips: '/tmp/game.ips' }, 'diska insert "/tmp/game.dsk" -ips "/tmp/game.ips"'],
 		['diskInsertFolder', { diskfolder: '/tmp/disk' }, 'diska insert "/tmp/disk"'],
 		['diskEject', {}, 'diska eject'],
 	] as const)('sends the Tcl command for %s', async (command, args, expectedCommand) => {

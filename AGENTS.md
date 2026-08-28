@@ -150,6 +150,7 @@ tests/
 │   ├── paths.test.ts        # detectOpenMSXExecutable
 │   ├── filesystem.test.ts   # extractDescriptionFromXML, addFileExtension, listResourcesDirectory, ensureDirectoryExists (mocked fs)
 │   ├── network.test.ts      # fetchCleanWebpage (mocked fetch, gzip)
+│   ├── ips.test.ts          # buildIpsPatch round-trips (pure)
 │   └── async.test.ts        # sleep, sleepWithAbort (fake timers, AbortController)
 ├── openmsx/
 │   ├── command-queue.test.ts # sendCommand serialization, reply parsing, timeout, ioBuffer handling
@@ -157,11 +158,27 @@ tests/
 ├── vectordb/
 │   ├── rrf.test.ts           # fuseRRF (Reciprocal Rank Fusion) pure function
 │   └── query-mapping.test.ts # VectorDB.query mapping (embed + lancedb mocked)
+├── fixtures/                 # e2e media + IPS patch pairs (see manual IPS test recipe below)
+│   ├── sample.dsk            # bootable MSX-DOS disk; AUTOEXEC.BAS prints a string at 0x1C15
+│   ├── sample.patch.ips      # rewrites that string → "PATCHED: DSK boot-sector msg!!!!!!!"
+│   ├── sample16k.rom         # 16 KB BASIC ROM printing "HELLO WORLD from sample 16KB ROM cart." (title at 0x2E)
+│   └── sample16k.patch.ips   # rewrites the title → "PATCHED 16KB ROM cart."
 └── tools/
     ├── screenshot.test.ts    # Path resolution, directory scan fallback, as_image, TCL command construction
     ├── replay.test.ts        # Command construction, .omr extension, path normalization, status parsing
+    ├── emu-media.test.ts     # carta/diska insert TCL construction, incl. `-ips` option
     └── keyboard.test.ts      # sendText encoding, sendKeyCombo matrix, error handling
 ```
+
+### Manual e2e test of IPS patching (verified 2026-08-28)
+
+`romInsert`/`diskInsert` pass `ips` through to openMSX as `carta/diska insert ... -ips ...`. Recipe:
+
+1. Launch a machine (e.g. `National_CF-3300`), then insert the patched fixture (`diskInsert`/`romInsert` with `ips` set).
+2. Reset as in any normal media-insert workflow — the IPS patch is applied **at insert time**, so it needs no extra reset. A reboot is only needed when adding/changing the `ips` of media the machine has already booted with.
+3. Wait ~5s, then verify on screen with `screenGetFullText` or a screenshot (see screen-capture workaround in "Cross-Platform Notes").
+
+DSK nuance (verified): the patch changes the disk image **in the drive**, not programs already loaded into RAM. If the machine already booted from the disk and a program is running, re-inserting with `ips` leaves the in-RAM program stale — reloading the program from disk picks up the patched content with **no reset**. If the program cannot be reloaded from disk (if auto-running after boot for instance), a reset is likely the only option to run the patched content.
 
 ### Writing new tests
 
@@ -178,6 +195,7 @@ tests/
 - The embedding/search stack uses prebuilt native binaries (`onnxruntime-node`, `@anush008/tokenizers`, `@lancedb/lancedb`) — no C++/Rust toolchain needed. `sharp` is no longer a dependency. (`@anush008/tokenizers` ships `win32-x64` but not `win32-arm64`.)
 - `node-expose-sspi` is optional — only needed on Windows for the `direct-sspi` fallback. The default `stdio-proxy` mode does not use it.
 - The bundled `bin/win-x64/mcp-openmsx-sspi-proxy.exe` is a self-contained .NET binary; it runs on Windows without a .NET runtime installed.
+- `openmsx_screen_shot`/`openmsx_screen_dump` write into openMSX's screenshots dir (e.g. `/opt/openMSX/share/screenshots`) and fail with `EACCES` when that dir is not writable. Workaround: the native Tcl command `screenshot /abs/path.png` (via `openmsx_openmsx_tcl_cmd`); the command is `screenshot`, not `save_screenshot`.
 
 ---
 
