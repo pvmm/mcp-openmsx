@@ -55,6 +55,8 @@ export function detectOpenMSXShareDir(): string {
 			path.join(os.homedir(), '.openMSX', 'share'),
 			'/usr/local/share/openmsx',
 			'/usr/share/openmsx',
+			// Linux source installs put openMSX under /opt/openMSX
+			'/opt/openMSX/share',
 			// Windows paths (appdata, documents, program files, portable)
 			...(process.env.APPDATA ? [path.join(process.env.APPDATA, 'openMSX', 'share')] : []),
 			...(process.env.LOCALAPPDATA ? [path.join(process.env.LOCALAPPDATA, 'openMSX', 'share')] : []),
