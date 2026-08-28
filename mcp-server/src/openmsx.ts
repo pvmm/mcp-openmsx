@@ -79,9 +79,18 @@ export class OpenMSX {
             };
 
             try {
-                if (this.process && !this.process.killed) {
-                    safeResolve(`Error: openMSX emulator instance is already running (current machine: ${this.lastMachine}). Close it first.`);
-                    return;
+                // Drop any stale reference to an openMSX subprocess that died
+                // externally (e.g. killed by the user, crashed). ChildProcess.killed
+                // is only set when *we* call kill(), so probe actual existence with
+                // signal 0 (throws ESRCH when the process is no longer running).
+                if (this.process) {
+                    if (this.isProcessAlive(this.process)) {
+                        safeResolve(`Error: openMSX emulator instance is already running (current machine: ${this.lastMachine}). Close it first.`);
+                        return;
+                    }
+                    diag('Stale openMSX process detected; clearing it before launch');
+                    this.process = null;
+                    this.isConnected = false;
                 }
                 this.resetIO();
                 this.commandQueue = Promise.resolve(''); // reset queue for new session
@@ -522,6 +531,25 @@ export class OpenMSX {
 
     async destroy(): Promise<void> {
         if (this.process && !this.process.killed) await this.emu_close();
+    }
+
+    /**
+     * Probe whether a tracked child process is still actually running.
+     * Sending signal 0 (process.kill(pid, 0)) is an existence check that
+     * does not signal the process; it throws ESRCH when the PID is gone.
+     */
+    private isProcessAlive(child: ChildProcess): boolean {
+        // Treat both null and undefined as "not exited yet" — Node only populates
+        // exitCode/signalCode (as a shadowed property) after the child has exited.
+        if (child.exitCode != null || child.signalCode != null) return false;
+        if (!child.pid) return false;
+        try {
+            process.kill(child.pid, 0);
+            return true;
+        } catch (err) {
+            const e = err as NodeJS.ErrnoException;
+            return e.code !== 'ESRCH';
+        }
     }
 
     forceClose(): void {

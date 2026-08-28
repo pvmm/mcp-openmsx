@@ -484,12 +484,52 @@ describe('emu_launch — Linux preflight and process failures', () => {
     priv.process = createLaunchMockProcess();
     priv.lastMachine = 'C-BIOS_MSX2';
 
+    // Simulate a genuinely live subprocess: signal-0 probe succeeds.
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
     const result = await instance.emu_launch('openmsx', '', []);
 
     expect(result).toBe(
       'Error: openMSX emulator instance is already running (current machine: C-BIOS_MSX2). Close it first.',
     );
     expect(mockSpawn).not.toHaveBeenCalled();
+    killSpy.mockRestore();
+  });
+
+  it('clears a stale process killed externally and proceeds with launch', async () => {
+    const mockProc = createLaunchMockProcess();
+    mockSpawn.mockReturnValue(mockProc as any);
+
+    const instance = new OpenMSX();
+    const priv = instance as any;
+    priv.process = createLaunchMockProcess();
+    priv.lastMachine = 'C-BIOS_MSX2';
+
+    // Simulate a dead (externally-killed) subprocess: the signal-0 probe throws ESRCH
+    // for the stale child, so the server clears it and proceeds with a fresh launch.
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      const err: NodeJS.ErrnoException = new Error('kill ESRCH') as NodeJS.ErrnoException;
+      err.code = 'ESRCH';
+      throw err;
+    });
+
+    const sendCmdSpy = vi.spyOn(instance, 'sendCommand').mockResolvedValue('');
+    const launchPromise = instance.emu_launch('openmsx', '', []);
+
+    // Complete the Linux connection handshake on the freshly spawned process.
+    mockProc.stdout.emit('data', Buffer.from('<openmsx-output>\n'));
+    await vi.advanceTimersByTimeAsync(500);
+    for (let i = 0; i < sendCmdSpy.mock.calls.length; i++) {
+      mockProc.stdout.emit('data', Buffer.from('<reply></reply>\n'));
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    const result = await launchPromise;
+    expect(result).toContain('Ok: openMSX emulator launched successfully');
+    expect(priv.process).not.toBeNull();
+    expect(mockSpawn).toHaveBeenCalled();
+    killSpy.mockRestore();
+    sendCmdSpy.mockRestore();
   });
 
   it('reports a process with no pid', async () => {
