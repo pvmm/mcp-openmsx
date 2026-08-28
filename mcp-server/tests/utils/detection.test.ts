@@ -84,6 +84,15 @@ describe('detectOpenMSXShareDir', () => {
     expect(detectOpenMSXShareDir()).toBe('/usr/local/share/openmsx');
   });
 
+  it('detects Linux source install at /opt/openMSX/share', () => {
+    mockExistsSync.mockImplementation((p: any) => {
+      const s = p.toString();
+      return s === '/opt/openMSX/share' || s === '/opt/openMSX/share/machines';
+    });
+    mockReaddirSync.mockReturnValue(['National_CF-3300.xml'] as any);
+    expect(detectOpenMSXShareDir()).toBe('/opt/openMSX/share');
+  });
+
   it('requires machines subdirectory to exist', () => {
     const linuxPath = path.join(os.homedir(), '.openMSX', 'share');
     // Directory exists but 'machines' subfolder does not
