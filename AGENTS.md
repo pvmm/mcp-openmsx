@@ -167,7 +167,7 @@ tests/
     ├── debug-tools.test.ts    # debug_run/debug_cpu/debug_memory/debug_vram/debug_log command routing, validation, and TCL construction
     ├── screenshot.test.ts     # Path resolution, directory scan fallback, as_image, TCL command construction
     ├── replay.test.ts         # Command construction, .omr extension, path normalization, status parsing
-    ├── emu-media.test.ts      # carta/diska insert TCL construction, incl. `-ips` option
+    ├── emu-media.test.ts      # carta/diska insert TCL construction incl. `-ips`, plus romInfo/diskInfo routing and response handling
     └── keyboard.test.ts       # sendText encoding, sendKeyCombo matrix, error handling
 ```
 
@@ -180,6 +180,17 @@ tests/
 3. Wait ~5s, then verify on screen with `screenGetFullText` or a screenshot (see screen-capture workaround in "Cross-Platform Notes").
 
 DSK nuance (verified): the patch changes the disk image **in the drive**, not programs already loaded into RAM. If the machine already booted from the disk and a program is running, re-inserting with `ips` leaves the in-RAM program stale — reloading the program from disk picks up the patched content with **no reset**. If the program cannot be reloaded from disk (if auto-running after boot for instance), a reset is likely the only option to run the patched content.
+
+### Querying inserted media (`romInfo` / `diskInfo`)
+
+`emu_media` also exposes read-only introspection commands that map to openMSX's `machine_info media`:
+
+| Command | TCL | Returns (Tcl dict) |
+|---------|-----|---------------------|
+| `romInfo` | `machine_info media carta` | `type target patches mappertype actualSHA1 originalSHA1` |
+| `diskInfo` | `machine_info media diska` | `type target readonly doublesided size patches` |
+
+Both return an openMSX dict as plain text. The `patches` key lists absolute IPS patch file paths applied to the inserted ROM/disk (`{}` when none). `actualSHA1` vs `originalSHA1` differing indicates a patch was applied.
 
 ### Writing new tests
 
